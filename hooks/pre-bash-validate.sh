@@ -50,8 +50,29 @@ fi
 
 # Check if this is a git commit (but not the --no-verify checks above which already exited)
 if echo "$COMMAND" | grep -qE "^git\s+commit"; then
-    # Determine project root and source environment detection
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    # ============================================
+    # EPHEMERAL BRANCH WARNING
+    # ============================================
+    # Warn when committing to branches that look like validation/headless runs.
+    # These branches should not accumulate feature work — commit to main instead.
+    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    if echo "$CURRENT_BRANCH" | grep -qE "^(validation-|headless-|uber-val-|fresh-install-)"; then
+        echo "" >&2
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+        echo "⚠️  EPHEMERAL BRANCH: $CURRENT_BRANCH" >&2
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+        echo "" >&2
+        echo "You are committing to what looks like a validation/test branch." >&2
+        echo "If this is feature work, switch to main first:" >&2
+        echo "" >&2
+        echo "  git stash && git checkout main && git stash pop" >&2
+        echo "" >&2
+        echo "If this commit is intentionally on this branch, proceed." >&2
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+        echo "" >&2
+    fi
 
     # ============================================
     # META REFERENCE LEAKAGE WARNING
@@ -71,63 +92,6 @@ if echo "$COMMAND" | grep -qE "^git\s+commit"; then
         echo "" >&2
     fi
 
-    fi
-
-    # ============================================
-    # ============================================
-        STAGED_FILES=$(git diff --staged --name-only 2>/dev/null)
-        if [ -n "$STAGED_FILES" ]; then
-            CLEARED_COUNT=0
-            TEMP_FILE=$(mktemp)
-            while IFS= read -r line; do
-                if echo "$line" | grep -q "^\- \["; then
-                    # Extract doc path: text between "• " and " - "
-                    DOC_PATH=$(echo "$line" | sed -n 's/.*• \(.*\) - .*/\1/p')
-                    # Resolve aliases
-                    case "$DOC_PATH" in
-                        "Root CLAUDE.md") RESOLVED="CLAUDE.md" ;;
-                        ".meta/design-decisions.md") RESOLVED="DESIGN_DECISIONS.md" ;;
-                        "Verify doc-map.md"*) RESOLVED=".claude/references/doc-map.md" ;;
-                        ".meta/"*) RESOLVED="" ;;  # gitignored, skip
-                        "Relevant "*) RESOLVED="" ;;  # too vague, skip
-                        *) RESOLVED="$DOC_PATH" ;;
-                    esac
-                    # Check if resolved path is in staged files
-                    if [ -n "$RESOLVED" ] && echo "$STAGED_FILES" | grep -qF "$RESOLVED"; then
-                        TIMESTAMP=$(echo "$line" | sed -n 's/.*\[\(.*\)\].*/\1/p')
-                        CLEARED_COUNT=$((CLEARED_COUNT + 1))
-                    else
-                        echo "$line" >> "$TEMP_FILE"
-                    fi
-                else
-                    echo "$line" >> "$TEMP_FILE"
-                fi
-            if [ "$CLEARED_COUNT" -gt 0 ]; then
-                echo "" >&2
-            fi
-        fi
-    fi
-
-    # ============================================
-    # PLUGIN SYNC AWARENESS (Non-blocking)
-    # ============================================
-    SYNC_MAP="$PROJECT_ROOT/.claude/plugin-sync-map.json"
-    if [[ -f "$SYNC_MAP" ]] && command -v jq &>/dev/null; then
-        STAGED_LIST=$(git diff --staged --name-only 2>/dev/null)
-        if [[ -n "$STAGED_LIST" ]]; then
-            SYNCABLE_PATHS=$(jq -r '.mappings | to_entries[] | .value[] | .factory' "$SYNC_MAP" 2>/dev/null)
-            SYNCABLE_STAGED=0
-            while IFS= read -r staged_file; do
-                if echo "$SYNCABLE_PATHS" | grep -qF "$staged_file"; then
-                    SYNCABLE_STAGED=$((SYNCABLE_STAGED + 1))
-                fi
-            done <<< "$STAGED_LIST"
-            if [[ "$SYNCABLE_STAGED" -gt 0 ]]; then
-                echo "Note: $SYNCABLE_STAGED syncable file(s) staged. Plugin may need updating after commit." >&2
-            fi
-        fi
-    fi
-
     # ============================================
     # COMMIT CHECKLIST PROMPT (Non-blocking)
     # ============================================
@@ -135,42 +99,10 @@ if echo "$COMMAND" | grep -qE "^git\s+commit"; then
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
     echo "COMMIT CHECKLIST" >&2
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-    echo "  [ ] Updated .meta/todo.md?" >&2
     echo "  [ ] Captured learnings in .claude/learnings.md?" >&2
     echo "  [ ] Design decision documented if architectural?" >&2
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
     echo "" >&2
-
-    # ============================================
-    # PENDING DOCUMENTATION ACTIONS (BLOCKING)
-    # ============================================
-    # Block commit if pending-actions.md has items (unless escape hatch used)
-        # Count non-empty, non-header lines (actual action items)
-        if [ "$ACTION_COUNT" -gt 0 ]; then
-            echo "" >&2
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-            echo "PENDING DOCUMENTATION ACTIONS ($ACTION_COUNT items)" >&2
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-            echo "" >&2
-            # Show the action items (lines starting with "- [")
-            echo "" >&2
-
-            # Check for escape hatch (environment variable)
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-                echo "" >&2
-            else
-                echo "BLOCKED: Pending documentation actions must be addressed!" >&2
-                echo "" >&2
-                echo "Options:" >&2
-                echo "  1. Address the pending actions and clear the file" >&2
-                echo "" >&2
-                echo "To clear after addressing:" >&2
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-                echo "" >&2
-                exit 2
-            fi
-        fi
-    fi
 fi
 
 # ============================================

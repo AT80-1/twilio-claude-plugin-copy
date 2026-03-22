@@ -1,16 +1,26 @@
 #!/bin/bash
-# ABOUTME: Post-write hook for auto-linting JavaScript files.
+# ABOUTME: Post-write hook for auto-linting JavaScript files and session tracking.
 # ABOUTME: Runs ESLint with auto-fix after Write/Edit operations on JS files.
 
+# ============================================
+# PARSE TOOL INPUT FROM STDIN
+# ============================================
 # Claude Code passes tool input as JSON on stdin, not env vars.
+# Capture it before anything else consumes stdin.
 HOOK_INPUT=""
 if [ ! -t 0 ]; then
     HOOK_INPUT="$(cat)"
 fi
 
+# Extract file path and session ID from JSON input
 FILE_PATH=""
+HOOK_SESSION_ID=""
+if [ -n "$HOOK_INPUT" ] && ! command -v jq &> /dev/null; then
+    echo "WARNING: jq not installed — post-write hooks disabled (auto-lint, session tracking). Run: brew install jq" >&2
+fi
 if [ -n "$HOOK_INPUT" ] && command -v jq &> /dev/null; then
     FILE_PATH="$(echo "$HOOK_INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null)"
+    HOOK_SESSION_ID="$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)"
 fi
 
 # Exit early if no file path
@@ -18,8 +28,57 @@ if [ -z "$FILE_PATH" ]; then
     exit 0
 fi
 
+# ============================================
+# SESSION FILE TRACKING
+# ============================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+
+# Session tracking directory
+SESSION_DIR="$PROJECT_ROOT/.claude"
+
+# Session-scoped state: isolate per-session to support concurrent Claude Code instances.
+if [ -n "$HOOK_SESSION_ID" ]; then
+    SESSIONS_DIR="$SESSION_DIR/.sessions"
+    mkdir -p "$SESSIONS_DIR"
+    SESSION_FILE="$SESSIONS_DIR/${HOOK_SESSION_ID}.files"
+    SESSION_START="$SESSIONS_DIR/${HOOK_SESSION_ID}.start"
+else
+    # Fallback for missing session_id (old Claude Code versions, testing)
+    SESSION_FILE="$SESSION_DIR/.session-files"
+    SESSION_START="$SESSION_DIR/.session-start"
+fi
+
+# Initialize session start time if not set
+if [ ! -f "$SESSION_START" ]; then
+    date +%s > "$SESSION_START"
+fi
+
+# Track this file (append if not already present)
+# Make path relative to project root for consistency
+REL_PATH="${FILE_PATH#$PROJECT_ROOT/}"
+if [ -n "$REL_PATH" ]; then
+    # Create session file if it doesn't exist
+    touch "$SESSION_FILE" 2>/dev/null
+    # Add file if not already tracked (with timestamp)
+    if ! grep -qF "$REL_PATH" "$SESSION_FILE" 2>/dev/null; then
+        echo "$(date +%s)|$REL_PATH" >> "$SESSION_FILE"
+    fi
+fi
+
+# ============================================
+# STRUCTURED EVENT EMISSION (observability)
+# ============================================
+
+if [ -f "$SCRIPT_DIR/_emit-event.sh" ]; then
+    source "$SCRIPT_DIR/_emit-event.sh"
+    EMIT_SESSION_ID="$HOOK_SESSION_ID"
+    emit_event "file_write" "$(jq -nc --arg fp "$REL_PATH" '{file_path: $fp}')"
+fi
+
 # Only process JavaScript files
-if [[ ! "$FILE_PATH" =~ \.(js|mjs|cjs)$ ]]; then
+if [[ ! "$FILE_PATH" =~ \.(js|mjs|cjs|ts)$ ]]; then
     exit 0
 fi
 
@@ -30,9 +89,12 @@ fi
 
 # Run ESLint with auto-fix if file exists
 if [ -f "$FILE_PATH" ]; then
+    # Check if npx is available
     if command -v npx &> /dev/null; then
+        # Run ESLint quietly, only show if there are unfixable issues
         LINT_OUTPUT=$(npx eslint "$FILE_PATH" --fix 2>&1)
         LINT_EXIT=$?
+
         if [ $LINT_EXIT -ne 0 ] && [ -n "$LINT_OUTPUT" ]; then
             echo "ESLint found issues in $(basename "$FILE_PATH"):"
             echo "$LINT_OUTPUT" | head -20

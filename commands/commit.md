@@ -90,7 +90,7 @@ If a `todo.md` file exists in the project root, and the committed work completes
 
 ### 2. Pending Actions
 
-If a `.claude/pending-actions.md` file exists, mention any doc update suggestions related to the committed files.
+If a `.claude/pending-actions.json` file exists, mention any doc update suggestions related to the committed files.
 
 ## Output
 

@@ -1,0 +1,336 @@
+---
+name: use-case-details
+description: Detailed implementation guidance for each voice use case including notifications, IVR, contact centers, AI agents, sales dialer, call tracking, and PSTN connectivity.
+---
+
+# Voice Use Case Implementation Details
+
+Detailed implementation guidance for each voice use case. See [../SKILL.md](../SKILL.md) for decision frameworks and quick reference.
+
+---
+
+## Voice Notifications
+
+**Goal:** Deliver information via outbound calls (appointments, payments, OTPs, alerts).
+
+**Requirements:**
+- Phone numbers (valid caller ID required)
+- Calls API for programmatic call creation
+- TwiML delivery method (URL, inline, Application SID, Functions)
+
+**Answer Optimization (critical for business outcomes):**
+
+| Feature | What It Does | Setup |
+|---------|--------------|-------|
+| **SHAKEN/STIR** | Green checkmark on mobile, proves number isn't spoofed | Per-number via Business Profile + Trust Product |
+| **Branded Calling** | Display business name (15-32 chars) | Requires Voice Integrity approval |
+| **Enhanced Branded Calling** | Name + logo + call reason | Requires SHAKEN/STIR Level A + LOA |
+| **Voice Integrity** | Register with carrier analytics to avoid spam labels | Business Profile with EIN/DUNS, 24-48hr remediation |
+| **AMD** | Detect human vs answering machine | `MachineDetection` parameter on Calls API |
+
+**CPS (Calls Per Second) Limits:**
+- Default: 1 CPS per account
+- Self-serve: Up to 5 CPS
+- Above 5: Offline approval process required
+- **Note:** `<Dial>` verb calls are NOT rate-limited
+
+**TwiML for Notifications:**
+- `<Say>` - Dynamic TTS content
+- `<Play>` - Pre-recorded audio (static messages, politician recordings)
+- Voice Insights Reports API for answer rates and blocked call detection
+
+**Pre-call Intelligence:**
+- Lookup API to check number type (landline vs mobile) and validity
+
+## Self-Service Automation
+
+**Goal:** Handle interactions without human agents (IVR, payments, appointments, account lookup).
+
+**Always use Functions** - see decision framework in SKILL.md.
+
+**Key TwiML:**
+
+| Verb | Use |
+|------|-----|
+| `<Gather>` | Capture DTMF or speech input. Use `input="dtmf speech"` for both. |
+| `<Pay>` | PCI-compliant payment capture (credit card, ACH) |
+| `<Record>` | Record interaction for QA, compliance |
+
+**AI-Powered Self-Service:**
+
+- **ConversationRelay** - LLM-powered dynamic conversations
+- **Dialogflow Virtual Agent** - Only if existing Dialogflow setup
+
+AI agents require additional monitoring:
+- Prompt injection detection
+- Hallucination monitoring
+- Sentiment analysis for escalation triggers
+- Recordings and transcriptions for guardrails
+
+**Containment Goal:** Keep interactions in self-service to avoid expensive human agents. But always provide escalation path.
+
+## Inbound Contact Center
+
+**Goal:** Route incoming calls to human agents with queuing, coaching, transfers.
+
+**Build on top of:** Self-service automation (IVR front-end for routing)
+
+**Connectivity Options:**
+- PSTN → Twilio number
+- Voice SDKs (JavaScript, iOS, Android) for agent softphones
+- SIP interface for existing infrastructure
+- BYOC for existing phone numbers
+
+**Conference Capabilities:**
+
+| Feature | How |
+|---------|-----|
+| Hold | Mute customer, play hold music via `<Play>` |
+| Mute | `muted` parameter on participant |
+| Coach | Supervisor joins with `coach=true` (hears all, unheard by customer) |
+| Whisper | Supervisor speaks to agent only |
+| Warm transfer | Three-way call before handoff |
+
+**Conference Insights (MANDATORY):**
+- Conference Summary endpoint for aggregate metrics
+- Conference Participant Summary for per-participant quality
+- Check for: participants not hearing each other, overlap issues, quality degradation
+
+**Queue Options:**
+- `<Enqueue>` / `<Queue>` for simple FIFO
+- TaskRouter for skill-based routing
+
+## Outbound Contact Center
+
+**Key Difference from Inbound:** Both parties join via Participants API (not incoming PSTN + agent dial-in).
+
+**Pattern:**
+1. Place outbound call via Participants API with AMD
+2. On answer → add to Conference
+3. On conference join event → add agent via Participants API
+4. Monitor conference events for orchestration
+
+**Why this pattern:** Optimizes agent time. Agents don't wait listening to ringing - they only join when customer answers.
+
+**Required features:**
+- AMD (detect human vs voicemail)
+- SHAKEN/STIR, Branded Calling (answer rates)
+- Conference Insights (quality monitoring)
+- Voice Insights Reports API (campaign performance)
+
+## Voice AI Agents
+
+**Two Paradigms:**
+
+**1. Native Twilio (Recommended):**
+- **ConversationRelay** - WebSocket to your LLM
+- **Dialogflow Virtual Agent** - Only if existing Dialogflow
+
+**2. Third-Party / Build-Your-Own:**
+- Bidirectional Media Streams (`<Connect><Stream>`)
+- Fork audio to WebSocket → third-party processes → returns audio
+
+**Both require:**
+- Recordings (compliance, debugging)
+- Transcriptions (QA, guardrails)
+- Voice Intelligence (entity detection, sentiment)
+- Prompt injection monitoring
+- Hallucination detection
+
+**Conference with AI Agents:**
+Currently less common but increasing. Consider starting with Conference if AI agent might escalate to human - avoids upgrading call later.
+
+## Sales Dialer
+
+**Essentially:** Outbound Contact Center variant
+
+**All outbound contact center features apply**, plus:
+- Higher CPS needs (may need offline approval)
+- AMD critical for efficiency
+- Branded Calling essential for answer rates
+- Voice Insights Reports API for campaign analytics
+- Voice Intelligence for propensity-to-buy signals
+
+## Call Tracking
+
+**Goal:** Marketing attribution via unique phone numbers per campaign.
+
+**Pattern:**
+1. Buy pool of Twilio numbers
+2. Assign unique number per campaign/ad
+3. `<Dial>` to common destination
+4. Log metadata (which number received call)
+5. Analyze which campaigns drive calls
+
+**Note:** `<Dial>` calls are NOT CPS rate-limited. AMD usually not relevant (expecting human to answer).
+
+## PSTN Connectivity
+
+**Use Case:** Customer owns SIP infrastructure, needs PSTN access.
+
+**CRITICAL:** Elastic SIP Trunking **BYPASSES Programmable Voice**.
+
+| Feature | Elastic SIP Trunking | Programmable Voice |
+|---------|---------------------|-------------------|
+| TwiML | Not available | Full access |
+| AMD | Not available | Available |
+| Custom call flows | Not available | Full flexibility |
+| Recording | At trunk level | Multiple methods |
+| Voice Insights | Available | Available |
+| CPS | Per trunk, per region | Per account |
+
+**When to use Elastic SIP Trunking:**
+- Customer has existing SIP PBX
+- Just need phone numbers or PSTN egress
+- No need for Programmable Voice features
+
+**When to use Programmable Voice:**
+- Need TwiML, AMD, custom call flows
+- Building applications, not just connectivity
+
+---
+
+## Cross-Cutting Concerns
+
+### Deep Validation (MANDATORY)
+
+**A 200 OK is NOT sufficient.** Voice calls can "appear to work" while silently failing. Every implementation MUST validate:
+
+```
+ALWAYS CHECK (every call):
+□ Call Resource (/Calls/{CallSid}) - status, duration, pricing
+□ Call Events (/Calls/{CallSid}/Events) - HTTP/API requests and responses
+□ Debugger - TwiML errors, HTTP errors, carrier errors
+□ Voice Insights Call Summary - quality score, disposition
+□ Voice Insights Call Events - timeline, SDK events
+□ Voice Insights Call Metrics - jitter, packet loss, latency
+□ Functions logging - your application logs
+
+WHEN USING CONFERENCE (add these):
+□ Conference Insights Summary - participant count, duration, aggregate quality
+□ Conference Insights Participant Summary - per-participant metrics, join/leave times
+```
+
+**Voice/Conference Insights Timing:**
+Summaries are NOT immediately available after call/conference ends:
+- **Partial data:** ~2 minutes after end (no SLA guarantee)
+- **Final data:** Locked and immutable 30 minutes after end
+- Check `processingState` field: `'partial'` vs `'complete'`
+- DeepValidator handles 404 gracefully when data not yet available
+
+**Feature Factory Enforcement:** Dev and review agents MUST verify all applicable checks pass. Use `DeepValidator.validateCall()` for calls and `DeepValidator.validateConference()` for conferences.
+
+### Trust & Answer Rates
+
+For outbound calls, implement all four:
+
+**1. SHAKEN/STIR Attestation**
+- Per-number setup via Trust Hub
+- Creates Business Profile (24hr vetting) → Trust Product (72hr vetting)
+- Levels: A (highest, full verification), B (partial), C (gateway)
+- Incoming calls: check `StirVerstat` webhook parameter
+- Call forwarding: pass `CallToken` to preserve verification
+
+**2. Voice Integrity**
+- Registers numbers with carrier analytics (T-Mobile, AT&T, Verizon)
+- Requires Business Profile with EIN/DUNS
+- 24-48 hour remediation after approval
+
+**3. Branded Calling (Basic)**
+- Display business name (15-32 chars depending on carrier)
+- Requires Voice Integrity approval
+- Mobile only - use CNAM for landlines
+- T-Mobile and Verizon (US)
+
+**4. Enhanced Branded Calling**
+- Name + logo + call reason
+- Requires SHAKEN/STIR Level A + signed LOA
+- Currently Public Beta
+
+### Media Streams
+
+**`<Start><Stream>` - Unidirectional:**
+- Your WebSocket receives audio only
+- Tracks: `inbound_track`, `outbound_track`, or `both_tracks`
+- Up to 4 streams per call
+- Continues TwiML execution after starting
+- Use for: real-time transcription, monitoring, analytics
+
+**`<Connect><Stream>` - Bidirectional:**
+- Your WebSocket receives AND sends audio
+- **Only inbound track** (no outbound option)
+- **Only 1 stream per call**
+- **Blocks subsequent TwiML** until WebSocket closes
+- Use for: AI voice agents, interactive dialogue
+
+**Both require:**
+- Secure WebSocket (wss://, port 443)
+- Audio format: mulaw 8000Hz, base64-encoded
+- Validate `X-Twilio-Signature` header
+
+**Gotcha:** Bidirectional streams support inbound DTMF only. Cannot send tone signals back.
+
+### Recording & Transcription
+
+**Recording Storage:**
+- Keep on Twilio (default)
+- Configure S3 bucket for external storage
+- DELETE via API when no longer needed
+- Consider regulatory retention requirements
+
+**Transcription Options:**
+
+| Type | When | Use |
+|------|------|-----|
+| Real-time | During call | ConversationRelay, Media Streams |
+| Batch (Voice Intelligence) | After call | Compliance, QA at scale |
+| Gather speech | During call | Simple intent detection |
+
+**Voice Intelligence features:**
+- Entity detection (competitors, products)
+- Sentiment analysis
+- PII redaction
+- Custom language operators
+
+**Scale Problem:** 5,000 calls = 11 days of linear listening. ML-powered transcription + analysis is required for any meaningful volume.
+
+---
+
+## 2026 Customer Problem Themes
+
+Context for what customers are asking for today:
+
+### Theme 1: Improve Answer Rates & Regulatory Compliance
+"Our calls show as spam likely / get blocked"
+→ Branded Calling, SHAKEN/STIR, Voice Integrity, Voice Insights
+
+"We need to comply with TCPA/TSR"
+→ AMD, consent management, proper call disposition
+
+### Theme 2: Turn Calls Into Actionable Content
+"We have 5,000 years of calls and don't know what's in them"
+→ Recordings, transcriptions, Voice Intelligence
+
+"We want to feed call content to AI/train models"
+→ Media Streams, transcription APIs
+
+### Theme 3: Evolve Self-Service with Agentic AI
+"Replace expensive human agents with AI"
+→ ConversationRelay, proper guardrails
+
+"Replace static IVRs with dynamic AI"
+→ ConversationRelay + monitoring
+
+### Theme 4: Adopt Modern Speech Technologies
+"Our TTS sounds robotic and dated"
+→ Neural/Generative voices
+
+"ASR doesn't understand customers"
+→ Latest speech recognition, real-time transcription
+
+### Theme 5: Understand Call Behavior
+"We don't have data science to analyze call data"
+→ Voice Insights suite, Reports API
+
+"Quality is our differentiator"
+→ Voice Insights Call Metrics, Conference Insights

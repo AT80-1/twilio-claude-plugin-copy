@@ -9,6 +9,9 @@ if [ ! -t 0 ]; then
 fi
 
 COMMAND=""
+if [ -n "$HOOK_INPUT" ] && ! command -v jq &> /dev/null; then
+    echo "WARNING: jq not installed — safety hooks disabled (--no-verify blocking, deploy gates). Run: brew install jq" >&2
+fi
 if [ -n "$HOOK_INPUT" ] && command -v jq &> /dev/null; then
     COMMAND="$(echo "$HOOK_INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)"
 fi
@@ -50,7 +53,9 @@ fi
 
 # Check if this is a git commit (but not the --no-verify checks above which already exited)
 if echo "$COMMAND" | grep -qE "^git\s+commit"; then
+    # Determine project root
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PROJECT_ROOT="${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
     # ============================================
     # EPHEMERAL BRANCH WARNING
@@ -75,21 +80,63 @@ if echo "$COMMAND" | grep -qE "^git\s+commit"; then
     fi
 
     # ============================================
-    # META REFERENCE LEAKAGE WARNING
+    # COVERAGE REGRESSION GUARDRAIL (BLOCKING)
     # ============================================
-    # Warn if staged files contain .meta/ references (potential leakage)
-    if git diff --staged 2>/dev/null | grep -qE '\.meta/'; then
-        echo "" >&2
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-        echo "⚠️  WARNING: Staged changes reference .meta/" >&2
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-        echo "" >&2
-        echo "This may indicate meta-development content leaking into shipped code." >&2
-        echo "Review with: git diff --staged | grep '.meta/'" >&2
-        echo "" >&2
-        echo "If this is intentional documentation about the separation, proceed." >&2
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-        echo "" >&2
+    # Prevents agents from deleting tests or reducing coverage.
+    # Two checks: (1) test file deletion detection (instant, always runs),
+    # (2) coverage baseline comparison (instant, runs if baseline exists).
+    if [ "${SKIP_COVERAGE_CHECK:-}" != "true" ]; then
+        # Check 1: Detect test file deletions in staged changes
+        DELETED_TESTS=$(git diff --staged --name-only --diff-filter=D 2>/dev/null \
+            | grep -E '\.(test|spec)\.(js|ts)$' || true)
+        if [ -n "$DELETED_TESTS" ]; then
+            DELETED_COUNT=$(echo "$DELETED_TESTS" | wc -l | tr -d ' ')
+            echo "" >&2
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+            echo "BLOCKED: $DELETED_COUNT test file(s) being deleted" >&2
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+            echo "" >&2
+            echo "$DELETED_TESTS" | head -10 >&2
+            echo "" >&2
+            echo "Test files should not be deleted without explicit approval." >&2
+            echo "If this is intentional, override: SKIP_COVERAGE_CHECK=true" >&2
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+            echo "" >&2
+            exit 2
+        fi
+
+        # Check 2: Coverage baseline regression (if baseline exists)
+        BASELINE_FILE="$PROJECT_ROOT/.coverage-baseline.json"
+        CURRENT_COVERAGE="$PROJECT_ROOT/coverage/coverage-summary.json"
+        if [ -f "$BASELINE_FILE" ] && [ -f "$CURRENT_COVERAGE" ] && command -v jq &>/dev/null; then
+            # Compare each metric — block if any drops more than 2%
+            REGRESSION_FOUND=false
+            REGRESSION_DETAILS=""
+            for METRIC in statements branches functions lines; do
+                BASELINE_VAL=$(jq -r ".coverage.$METRIC // 0" "$BASELINE_FILE" 2>/dev/null)
+                CURRENT_VAL=$(jq -r ".total.$METRIC.pct // 0" "$CURRENT_COVERAGE" 2>/dev/null)
+                DROP=$(echo "$BASELINE_VAL - $CURRENT_VAL" | bc -l 2>/dev/null || echo "0")
+                if [ "$(echo "$DROP > 2" | bc -l 2>/dev/null || echo "0")" = "1" ]; then
+                    REGRESSION_FOUND=true
+                    REGRESSION_DETAILS="${REGRESSION_DETAILS}  $METRIC: ${CURRENT_VAL}% (was ${BASELINE_VAL}%, dropped ${DROP}%)\n"
+                fi
+            done
+            if [ "$REGRESSION_FOUND" = true ]; then
+                echo "" >&2
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+                echo "BLOCKED: Coverage regression detected (>2% drop)" >&2
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+                echo "" >&2
+                printf "%b" "$REGRESSION_DETAILS" >&2
+                echo "" >&2
+                echo "Add tests to restore coverage before committing." >&2
+                echo "To update baseline: ./scripts/save-coverage-baseline.sh" >&2
+                echo "Override: SKIP_COVERAGE_CHECK=true git commit ..." >&2
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+                echo "" >&2
+                exit 2
+            fi
+        fi
     fi
 
     # ============================================
@@ -119,6 +166,52 @@ if echo "$COMMAND" | grep -qE "^git\s+commit"; then
         echo "" >&2
         if [ "${SKIP_PATH_CHECK:-}" != "true" ]; then
             exit 2
+        fi
+    fi
+
+    # ============================================
+    # TYPESCRIPT COMPILATION CHECK (BLOCKING)
+    # ============================================
+    # Run tsc --noEmit for staged .ts/.tsx files to catch type errors before commit.
+    # Only runs for packages that have staged TypeScript files.
+    STAGED_TS=$(git diff --staged --name-only 2>/dev/null | grep -E '\.(ts|tsx)$' || true)
+    if [ -n "$STAGED_TS" ] && command -v npx &>/dev/null; then
+        TSC_FAILED=false
+        TSC_ERRORS=""
+
+        # Check MCP server package
+        if echo "$STAGED_TS" | grep -q '^agents/mcp-servers/twilio/'; then
+            MCP_TSC_OUT=$(cd "$PROJECT_ROOT/agents/mcp-servers/twilio" && npx tsc --noEmit 2>&1 || true)
+            if echo "$MCP_TSC_OUT" | grep -q 'error TS'; then
+                TSC_FAILED=true
+                TSC_ERRORS="${TSC_ERRORS}\n--- agents/mcp-servers/twilio ---\n$(echo "$MCP_TSC_OUT" | grep 'error TS' | head -10)"
+            fi
+        fi
+
+        # Check Feature Factory package
+        if echo "$STAGED_TS" | grep -q '^agents/feature-factory/'; then
+            FF_TSC_OUT=$(cd "$PROJECT_ROOT/agents/feature-factory" && npx tsc --noEmit 2>&1 || true)
+            if echo "$FF_TSC_OUT" | grep -q 'error TS'; then
+                TSC_FAILED=true
+                TSC_ERRORS="${TSC_ERRORS}\n--- agents/feature-factory ---\n$(echo "$FF_TSC_OUT" | grep 'error TS' | head -10)"
+            fi
+        fi
+
+        if [ "$TSC_FAILED" = true ]; then
+            echo "" >&2
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+            echo "BLOCKED: TypeScript compilation errors in staged files" >&2
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+            printf "%b" "$TSC_ERRORS" >&2
+            echo "" >&2
+            echo "" >&2
+            echo "Fix type errors before committing." >&2
+            echo "Override: SKIP_TSC_CHECK=true git commit ..." >&2
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+            echo "" >&2
+            if [ "${SKIP_TSC_CHECK:-}" != "true" ]; then
+                exit 2
+            fi
         fi
     fi
 

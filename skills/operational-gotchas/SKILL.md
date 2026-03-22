@@ -5,7 +5,7 @@ description: Cross-cutting debugging gotchas from real Twilio development sessio
 
 # Operational Gotchas
 
-Cross-cutting gotchas discovered through real debugging sessions. Domain-specific gotchas live in their respective CLAUDE.md files; these are the ones that span multiple domains or have no single home.
+Cross-cutting gotchas discovered through real debugging sessions. Domain-specific gotchas live in their respective skill files; these are the ones that span multiple domains or have no single home.
 
 ## SIP Connectivity Taxonomy
 
@@ -31,7 +31,7 @@ Cross-cutting gotchas discovered through real debugging sessions. Domain-specifi
 
 - **Newman E2E needs local server** — `npm run test:e2e` hits `localhost:3000`. Start `npm start` (twilio-run) first. Use `--timeout-request 5000` to avoid hangs.
 
-- **`<Start><Recording>` hangs twilio-run locally** — Functions using `twiml.start().recording()` hang indefinitely on the local dev server and never return a response. Affected: ivr-welcome, notification-outbound, outbound-customer-leg, sales-dialer-prospect, call-tracking-inbound, contact-center-welcome. Works fine deployed. E2E tests exclude these for local runs; use `npm run test:e2e:deployed` for full coverage.
+- **`<Start><Recording>` hangs twilio-run locally** — Functions using `twiml.start().recording()` hang indefinitely on the local dev server and never return a response. Works fine deployed. E2E tests should exclude these for local runs; use deployed endpoints for full coverage.
 
 ## Serverless Runtime
 
@@ -87,7 +87,7 @@ Cross-cutting gotchas discovered through real debugging sessions. Domain-specifi
 
 - **Auth token rotation invalidates ALL API keys** — When the auth token is rotated/expired, every API key created under it dies. Regional and US keys all fail simultaneously. Only recovery: fresh auth token from Console → create new keys.
 
-- **Twilio Node SDK regional constructor** — `Twilio(apiKeySid, apiKeySecret, { accountSid, region: 'au1', edge: 'sydney' })` for API key auth. `Twilio(accountSid, authToken, { region, edge })` for auth token auth. The MCP server's `createTwilioMcpServer()` supports both via `TWILIO_API_KEY`/`TWILIO_API_SECRET`/`TWILIO_REGION`/`TWILIO_EDGE` env vars.
+- **Twilio Node SDK regional constructor** — `Twilio(apiKeySid, apiKeySecret, { accountSid, region: 'au1', edge: 'sydney' })` for API key auth. `Twilio(accountSid, authToken, { region, edge })` for auth token auth. The MCP server supports both via `TWILIO_API_KEY`/`TWILIO_API_SECRET`/`TWILIO_REGION`/`TWILIO_EDGE` env vars.
 
 - **Twilio Node SDK auto-reads `TWILIO_REGION` and `TWILIO_EDGE` from env** — The SDK reads these env vars automatically even when not passed in the constructor options. Setting them in `.env` silently routes ALL API calls to regional infrastructure (`api.{edge}.{region}.twilio.com`). If those calls use a US1 auth token, every request returns 401. Symptoms: cascading auth failures across unrelated tests with no obvious cause. Fix: comment out or unset `TWILIO_REGION`/`TWILIO_EDGE` when not actively testing regional endpoints.
 
@@ -99,16 +99,8 @@ Cross-cutting gotchas discovered through real debugging sessions. Domain-specifi
 
 - **`source .env` does not undo commented-out vars** — Shell variables persist in memory after commenting out lines in `.env`. Must explicitly `unset TWILIO_REGION TWILIO_EDGE` etc. before re-sourcing. This interacts badly with MCP (which also needs a restart to pick up the unset).
 
-- **dotenv `{ override: true }` is project-wide policy** — All `require('dotenv').config()` calls in this project use `{ override: true }` so `.env` values always win over inherited shell vars. The shipped `.envrc` provides the same isolation for shell scripts via explicit `unset` before loading. New users with pre-existing Twilio env vars (from `.zshrc`, other projects, or Twilio CLI) would otherwise hit silent auth failures. Run `./scripts/env-doctor.sh` to diagnose conflicts.
+- **dotenv `{ override: true }` is recommended** — Using `require('dotenv').config({ override: true })` ensures `.env` values always win over inherited shell vars. Users with pre-existing Twilio env vars (from `.zshrc`, other projects, or Twilio CLI) would otherwise hit silent auth failures.
 
-## Hooks & Documentation Flywheel
+## Hooks & Documentation
 
-- **Hooks receive tool input on stdin as JSON, not env vars** — `CLAUDE_TOOL_INPUT_FILE_PATH`, `CLAUDE_TOOL_INPUT_COMMAND`, `CLAUDE_TOOL_INPUT_CONTENT` don't exist. Parse stdin with `jq`: `FILE_PATH="$(cat | jq -r '.tool_input.file_path // empty')"`. All 4 hooks (pre-bash-validate, pre-write-validate, post-write, post-bash) were silently broken until fixed.
-
-- **Flywheel must exclude its own output files** — Editing `pending-actions.md` triggers post-write, which tracks it in `.session-files`, which the next flywheel run picks up, generating infinite recursive suggestions. Filter out `pending-actions.md`, `.session-files`, `.session-start`, `.last-doc-check` from the file collection.
-
-- **Pending actions auto-clear only works for concrete paths** — Entries with vague targets ("Relevant CLAUDE.md") or gitignored paths (`todo.md`) never match staged files and accumulate forever. Always use specific file paths in suggestions.
-
-- **Flywheel has 4 sources** — git status (uncommitted), recent commits (since session start), session-tracked files (.session-files), validation failure patterns (pattern-db.json). Source 3 was broken until the stdin fix.
-
-- **Meta-mode hook blocks writes outside project root** — `pre-write-validate.sh` prefix-strips `PROJECT_ROOT/` from `FILE_PATH`. When path is outside the project (e.g., `~/plans/`), the strip is a no-op, leaving an absolute path that matches no allowed patterns. Fixed: wrapped case block in `if [[ "$RELATIVE_PATH" != "$FILE_PATH" ]]`.
+- **Hooks receive tool input on stdin as JSON, not env vars** — `CLAUDE_TOOL_INPUT_FILE_PATH`, `CLAUDE_TOOL_INPUT_COMMAND`, `CLAUDE_TOOL_INPUT_CONTENT` don't exist. Parse stdin with `jq`: `FILE_PATH="$(cat | jq -r '.tool_input.file_path // empty')"`. All 4 hooks (pre-bash-validate, pre-write-validate, post-write, post-bash) use this pattern.

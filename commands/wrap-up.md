@@ -16,7 +16,6 @@ git diff --name-only HEAD  # unstaged + staged changes vs last commit
 git diff --cached --name-only  # staged changes only
 ```
 
-
 ### 1b. Mine Commit Messages for Un-Captured Learnings
 
 Check this session's commits for discovery signals that may not have been recorded:
@@ -80,7 +79,7 @@ For each changed file, determine if documentation needs updating:
 
 Only update docs where the session's changes actually warrant it. Don't touch docs for unrelated areas.
 
-### 4. Sync Auto-Memory ↔ Shipped Docs
+### 4. Sync Auto-Memory and Shipped Docs
 
 **Promote outward**: Check auto-memory for entries that should be in shipped docs:
 
@@ -108,7 +107,7 @@ Example:
 - Details that are now in shipped docs...
 ```
 
-**Cross-check learnings ↔ auto-memory**: Ensure nothing fell through the cracks:
+**Cross-check learnings and auto-memory**: Ensure nothing fell through the cracks:
 - Read the session learnings file — are there entries that should also be in auto-memory (for cross-session persistence)?
 - Read auto-memory — are there entries from this session that should also be in the learnings file (for the promote/clear flywheel)?
 - Are there auto-memory entries that represent an architectural choice worth recording in design documentation? Signs: "we chose X over Y", "US1 is default because...", "regional requires explicit opt-in".

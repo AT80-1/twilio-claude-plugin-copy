@@ -16,7 +16,7 @@ This skill is adapted from [Agent Skills for Context Engineering](https://github
 | Memory Type | Scope | Duration | Storage |
 |-------------|-------|----------|---------|
 | Session | Current conversation | Until session ends | In-context |
-| Project | Across sessions | Persistent | Files (git) |
+| Project | Across sessions | Persistent | Files (CLAUDE.md, git) |
 | Call/Message | Per interaction | Until call/message ends | Twilio + logs |
 | Workflow | Per feature/task | Until task complete | Todo list, commits |
 
@@ -105,6 +105,20 @@ const state = doc.data;
 | Git/files | Code, configuration, permanent documentation |
 | In-context | Current session only, will be lost on restart |
 
+### CLAUDE.md as Project Memory
+
+Root CLAUDE.md stores:
+- Project standards and conventions
+- Available commands and workflows
+- Environment variable requirements
+- Testing requirements
+
+Subdirectory CLAUDE.md stores:
+- API-specific patterns
+- TwiML examples
+- Webhook parameter references
+- Common error codes
+
 ### Git History as Memory
 
 ```bash
@@ -124,7 +138,7 @@ git diff --name-only HEAD~5
 # Project Todo
 
 ## In Progress
-- [ ] Voice IVR menu (MC)
+- [ ] Voice IVR menu
 
 ## Pending
 - [ ] SMS keyword routing
@@ -215,6 +229,9 @@ const previousSelection = event.menu_selection;
 Log state transitions for debugging:
 
 ```javascript
+// ABOUTME: Logs call state transitions for debugging.
+// ABOUTME: Append-only log pattern for call flow tracing.
+
 const logStateTransition = (callSid, fromState, toState, data) => {
   console.log(JSON.stringify({
     timestamp: new Date().toISOString(),
@@ -238,6 +255,7 @@ Git history is the primary activity log:
 - Commits capture what changed and why
 - `todo.md` captures session progress
 - `learnings.md` captures discoveries (capture → promote → clear)
+- `DESIGN_DECISIONS.md` captures architectural rationale
 
 ```bash
 # What was done recently
@@ -250,9 +268,20 @@ git log --name-only --oneline --grep="voice IVR"
 git diff HEAD~5 --name-only
 ```
 
+### Documentation Flywheel
+
+The documentation flywheel uses file-based communication:
+- Hooks write suggestions to `.claude/pending-actions.json`
+- Agent reads file before commits
+- File is cleared after actions addressed
+
+```
+Hook runs → pending-actions.json → Agent reads → Takes action → Clears file
+```
+
 ### Workflow State Tracking
 
-For orchestrated workflows, track phase completion:
+For multi-phase pipeline workflows, track phase completion:
 
 ```markdown
 ## Workflow: new-feature "Voice IVR"
@@ -262,10 +291,10 @@ Status: IN_PROGRESS
 ### Phase History
 | Phase | Agent | Status | Timestamp |
 |-------|-------|--------|-----------|
-| 1 | architect | COMPLETE | 10:23 |
-| 2 | spec | COMPLETE | 10:35 |
-| 3 | test-gen | COMPLETE | 10:52 |
-| 4 | dev | IN_PROGRESS | 11:05 |
+| 1 | /architect | COMPLETE | 10:23 |
+| 2 | /spec | COMPLETE | 10:35 |
+| 3 | /test-gen | COMPLETE | 10:52 |
+| 4 | /dev | IN_PROGRESS | 11:05 |
 
 ### Artifacts Created
 - spec.md (phase 2)
@@ -276,7 +305,7 @@ Status: IN_PROGRESS
 - None
 
 ### Decisions Log
-- Phase 1: Chose orchestrator pattern
+- Phase 1: Chose sequential pipeline pattern
 - Phase 2: DTMF-only, 3 options
 - Phase 3: 6 test cases defined
 ```
@@ -292,7 +321,7 @@ Status: IN_PROGRESS
 
 ### Don't Repeat
 
-- Information already in skill files
+- Information already in CLAUDE.md
 - Standard Twilio API signatures
 - Boilerplate patterns
 - Previously stated decisions
@@ -311,8 +340,8 @@ Status: IN_PROGRESS
 # Search git commits
 git log --all --oneline --grep="X"
 
-# Search skill files
-grep -r "X" --include="*.md" skills/
+# Search CLAUDE.md files
+grep -r "X" --include="CLAUDE.md" .
 ```
 
 ### "What files did we change for feature Y?"

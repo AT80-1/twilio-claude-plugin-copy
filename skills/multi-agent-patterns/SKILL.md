@@ -22,6 +22,44 @@ This skill is adapted from [Agent Skills for Context Engineering](https://github
 | Evaluator | Quality gates | Code review with standards |
 | TDD Pipeline | Code quality | Red → Green → Refactor |
 
+## Cross-Cutting Concerns
+
+### Human Approval Gates
+
+The project operates in "Highly Supervised" autonomy mode. Human approval is required at key checkpoints:
+
+```
+architect → [APPROVAL] → spec → [APPROVAL] → test-gen → dev → qa → review → [APPROVAL] → docs
+```
+
+Approval gates pause execution until human confirms:
+- Architecture decisions are sound
+- Specifications are correct
+- Code is ready for merge
+
+### TDD Enforcement
+
+All development workflows enforce Test-Driven Development via pre-phase hooks:
+
+1. **test-gen** must create tests that **fail** initially (Red phase)
+2. **tdd-enforcement hook** runs BEFORE dev phase and verifies:
+   - Tests exist (`testsCreated > 0`)
+   - Tests are FAILING
+3. **dev** is blocked with `TDD VIOLATION` if tests pass or don't exist
+4. **dev** implements minimal code to make tests pass (Green phase)
+5. **review** validates TDD was followed
+
+```typescript
+// Pre-phase hooks in workflow definition
+{
+  agent: 'dev',
+  name: 'TDD Green Phase',
+  prePhaseHooks: ['tdd-enforcement'],  // Blocks if tests don't fail
+}
+```
+
+See the `tdd-workflow` skill for detailed TDD patterns.
+
 ## Orchestrator Pattern (Default)
 
 A central coordinator manages the workflow, invoking specialists in sequence.
@@ -30,13 +68,14 @@ A central coordinator manages the workflow, invoking specialists in sequence.
 
 ```
                     ┌─────────────┐
-                    │ Orchestrator│
+                    │  Claude Code │
+                    │  (sequencer) │
                     └──────┬──────┘
                            │
      ┌─────────┬───────────┼───────────┬─────────┐
      ▼         ▼           ▼           ▼         ▼
 ┌─────────┐ ┌─────┐ ┌──────────┐ ┌─────┐ ┌────────┐
-│architect│ │spec │ │ test-gen │ │ dev │ │ review │
+│/architect│ │/spec│ │/test-gen │ │/dev │ │/review │
 └─────────┘ └─────┘ └──────────┘ └─────┘ └────────┘
 ```
 
@@ -49,27 +88,29 @@ A central coordinator manages the workflow, invoking specialists in sequence.
 ### Twilio Example: New Voice Feature
 
 ```
-Phase 1: architect
+/architect "Add voicemail recording"
+
+Phase 1: /architect
   → Design: functions/voice/voicemail.protected.js
   → Pattern: Record verb with callback
 
-Phase 2: spec
+Phase 2: /spec
   → Input: CallSid, RecordingUrl
   → Output: TwiML with Record, callback handling
 
-Phase 3: test-gen
+Phase 3: /test-gen
   → Unit tests for TwiML generation
   → Integration test for recording callback
 
-Phase 4: dev
+Phase 4: /dev
   → Implement voicemail.protected.js
   → Make tests pass
 
-Phase 5: review
+Phase 5: /review
   → Security: Protected endpoint ✓
-  → Patterns: Matches voice skill ✓
+  → Patterns: Matches voice/CLAUDE.md ✓
 
-Phase 6: test
+Phase 6: /test
   → All tests passing ✓
 ```
 
@@ -78,7 +119,7 @@ Phase 6: test
 Each agent passes structured context to the next:
 
 ```markdown
-## Handoff: architect → spec
+## Handoff: /architect → /spec
 
 Files identified:
 - functions/voice/voicemail.protected.js (create)
@@ -94,7 +135,7 @@ Ready for: Detailed specification
 
 ## Peer-to-Peer Pattern
 
-Agents work in parallel on related but independent tasks.
+Agents work in parallel on related but independent tasks. For true parallel coordination with inter-agent messaging, see [Agent Teams Pattern](#agent-teams-pattern) above.
 
 ### Structure
 
@@ -121,11 +162,11 @@ Agents work in parallel on related but independent tasks.
 ```
 Parallel agents:
 
-Agent A: twilio-logs
+Agent A: /twilio-logs
   → Analyzing debugger for error 30003
   → Found: Unreachable destination +1555...
 
-Agent B: dev (investigating)
+Agent B: /dev (investigating)
   → Reading send-sms.protected.js
   → Found: No validation on 'to' parameter
 
@@ -164,7 +205,7 @@ A lead agent delegates to sub-agents, which may further delegate.
 ```
               ┌──────────────┐
               │  Lead Agent  │
-              │   architect  │
+              │  /architect  │
               └───────┬──────┘
                       │
         ┌─────────────┼─────────────┐
@@ -176,7 +217,7 @@ A lead agent delegates to sub-agents, which may further delegate.
         │             │             │
      ┌──┴──┐       ┌──┴──┐       ┌──┴──┐
      ▼     ▼       ▼     ▼       ▼     ▼
-   spec   dev    spec   dev    spec   dev
+   /spec  /dev   /spec  /dev   /spec  /dev
 ```
 
 ### When to Use
@@ -188,25 +229,46 @@ A lead agent delegates to sub-agents, which may further delegate.
 ### Twilio Example: Multi-Channel Notification System
 
 ```
-Lead: architect "Build notification system with voice, SMS, and email fallback"
+Lead: /architect "Build notification system with voice, SMS, and email fallback"
 
 Delegation:
 ├── Voice Team
-│   ├── spec voice notification (call + TTS)
-│   └── dev functions/voice/notify.protected.js
+│   ├── /spec voice notification (call + TTS)
+│   └── /dev functions/voice/notify.protected.js
 │
 ├── SMS Team
-│   ├── spec SMS notification
-│   └── dev functions/messaging/notify.protected.js
+│   ├── /spec SMS notification
+│   └── /dev functions/messaging/notify.protected.js
 │
 └── Orchestration Team
-    ├── spec fallback logic (voice → SMS → email)
-    └── dev functions/helpers/notify-orchestrator.private.js
+    ├── /spec fallback logic (voice → SMS → email)
+    └── /dev functions/helpers/notify-orchestrator.private.js
 
 Rollup:
 - Each team reports completion + test status
 - Lead verifies integration
-- Final review of complete system
+- Final /review of complete system
+```
+
+### Supervision Protocol
+
+Lead agent maintains oversight:
+
+```markdown
+## Status: Multi-Channel Notification
+
+Voice Team: COMPLETE
+- notify-voice.protected.js ✓
+- Tests passing ✓
+
+SMS Team: IN_PROGRESS
+- notify-sms.protected.js ✓
+- Tests: 1 failing (rate limit handling)
+
+Verify Team: BLOCKED
+- Waiting on SMS team completion
+
+Lead action: Assist SMS team with rate limit test
 ```
 
 ## Evaluator Pattern
@@ -218,7 +280,7 @@ An evaluator agent assesses work quality against standards.
 ```
 ┌─────────┐     ┌───────────┐     ┌──────────┐
 │Producer │────►│ Evaluator │────►│ Decision │
-│   dev   │     │  review   │     │PASS/FAIL │
+│  /dev   │     │  /review  │     │PASS/FAIL │
 └─────────┘     └───────────┘     └──────────┘
                       │
                       ▼
@@ -237,9 +299,9 @@ An evaluator agent assesses work quality against standards.
 ### Twilio Example: Code Review Gate
 
 ```
-review functions/voice/transfer-call.protected.js
+/review functions/voice/transfer-call.protected.js
 
-Evaluation criteria:
+Evaluation criteria (from CLAUDE.md):
 
 □ ABOUTME comments present
   ✓ Line 1-2: Descriptive ABOUTME
@@ -304,6 +366,8 @@ Real parallel coordination with inter-agent messaging. Unlike subagents (which s
 ### Twilio Example: Bug Fix with Competing Hypotheses
 
 ```
+/team bug-fix "SMS webhook returning 500 for empty body"
+
 Parallel investigators:
 
 Teammate "code-tracer":
@@ -327,20 +391,28 @@ Lead synthesis:
   → Regression test: Empty body should return 400, not 500
 ```
 
+### Quality Gates
+
+Teammates are subject to `TeammateIdle` and `TaskCompleted` hooks:
+- test-gen tasks: Tests must exist AND fail
+- dev tasks: Tests must pass + lint clean
+- qa tasks: Coverage >= 80%
+- All tasks: No hardcoded credentials
+
 ## Pattern Selection Guide
 
 ```
 Is work sequential with clear phases?
-├── Yes → Orchestrator Pattern
-│         Use orchestrate subagent
+├── Yes → Sequential Pipeline
+│         Start with /architect, follow phase sequence
 │
 └── No → Do agents need to discuss findings?
          ├── Yes → Agent Teams Pattern
-         │         Use team coordination
+         │         Use /team command
          │
          └── No → Can tasks run independently?
                   ├── Yes → Peer-to-Peer Pattern
-                  │         Run multiple tasks in parallel
+                  │         Run multiple commands in parallel
                   │
                   └── No → Is there natural hierarchy?
                            ├── Yes → Hierarchical Pattern

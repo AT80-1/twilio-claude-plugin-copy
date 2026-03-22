@@ -40,6 +40,7 @@ Rules that have each caused real debugging time loss.
 - **`source .env` doesn't undo commented-out vars** — Shell retains values after commenting out lines. Must explicitly `unset` each variable before re-sourcing.
 - **SDK auto-reads `TWILIO_REGION`/`TWILIO_EDGE` from env** — Setting these in `.env` silently routes all API calls to regional endpoints. US1 auth tokens fail with 401 on regional endpoints. Comment out when not actively testing regions.
 - **dotenv default mode doesn't override shell vars** — `require('dotenv').config()` skips vars already in `process.env`. All project dotenv calls use `{ override: true }` so `.env` always wins.
+- **jq is required, not optional** — Hook scripts that use jq for validation silently skip ALL validation when jq is absent. Ensure jq is installed if using JSON-processing hooks.
 </architectural_invariants>
 
 ## Voice & ConversationRelay Protocol Invariants

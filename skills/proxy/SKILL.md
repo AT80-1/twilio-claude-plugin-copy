@@ -1,45 +1,222 @@
 ---
 name: proxy
-description: Anonymous number masking with Twilio Proxy for rideshare, marketplace, and healthcare use cases.
+description: Twilio Proxy number masking guide. Use when building anonymous communication between two parties (rider/driver, buyer/seller), managing proxy number pools, or debugging masked call/SMS flows.
 ---
 
-# Proxy Skill
+<!-- verified: twilio.com/docs/proxy, twilio.com/docs/proxy/api/service, twilio.com/docs/proxy/api/session, twilio.com/docs/proxy/api/participant, twilio.com/docs/proxy/api/interaction, twilio.com/docs/proxy/api/phone-number, twilio.com/docs/proxy/reserved-phone-numbers + live testing 2026-03-25 -->
 
-Anonymous number masking with Twilio Proxy for rideshare, marketplace, and healthcare use cases.
+# Twilio Proxy
 
-## What is Twilio Proxy?
+Anonymous number masking between two parties. Covers session lifecycle, participant management, number pool strategy, webhook types, and error handling. **Proxy is Public Beta, closed to new customers** — existing customers can continue using it but it is not covered by Twilio SLA.
 
-Proxy enables anonymous communication between two parties (e.g., rider/driver, buyer/seller) through masked phone numbers. Neither party sees the other's real number.
+## Scope
 
-## Session Flow
+### CAN
+
+- Mask phone numbers between exactly 2 participants per session
+- Voice calls and SMS through masked proxy numbers, configurable per session mode
+- Auto-assign proxy numbers from the service's number pool based on geo-matching and stickiness
+- Three session modes: `voice-and-message`, `voice-only`, `message-only`
+- TTL-based session expiry with reset on each interaction
+- Explicit `dateExpiry` (absolute timestamp) that overrides TTL
+- Service-level `defaultTtl` as fallback when sessions omit TTL
+- Close sessions programmatically (`Status=closed`) with `closedReason: "api"`
+- **Reopen closed sessions** to `in-progress` status — participants and proxy assignments preserved
+- Three webhook types: informational callback, intercept (gating), out-of-session
+- Intercept callback: return 403 to block an interaction before it connects
+- Out-of-session callback: auto-create sessions via JSON response when no active session matches
+- Number pool with reserved/unreserved distinction and `inUse` counter
+- Geo-matching: `country` (global), `area-code` (NA only), `extended-area-code` (NA only)
+- Number selection: `prefer-sticky` (reuse proxy per real number) vs `avoid-sticky` (maximum privacy)
+- Read-only interaction log with inbound/outbound legs linking to Call/Message SIDs
+
+### CANNOT
+
+- **Max 2 participants per session** — Adding a 3rd returns error 80609. This is a hard platform limit, not configurable. For multi-party masking, create multiple sessions.
+- **Cannot reopen a session to `open` status** — Closed sessions can only be reopened to `in-progress`. Attempting `Status=open` returns error 80608: "To re-open a session, choose In Progress."
+- **Cannot use fake phone numbers as participant identifiers** — Proxy validates reachability. Numbers like `+15551234567` return error 80404 "does not appear to be a valid, reachable identity." Use real phone numbers only.
+- **Cannot auto-assign reserved numbers** — Reserved numbers are excluded from the auto-assignment pool. Adding a participant when only reserved numbers exist returns error 80207. Explicit assignment via `ProxyIdentifierSid` also fails in practice despite documentation suggesting otherwise.
+- **Service deletion cascades silently** — Deleting a Proxy Service returns HTTP 204 and destroys all sessions, participants, interactions, and number assignments without warning or confirmation. There is no "are you sure" guard.
+- **Proxy overwrites phone number webhooks** — Adding a number to a Proxy pool changes its voice and SMS webhook URLs. When the service is deleted, webhooks revert to Twilio demo defaults, NOT the original values. Back up webhook configuration before adding numbers to Proxy.
+- **No MCP tools at runtime** — All 17 Proxy tools exist in MCP server source but are not loaded as deferred tools. Use REST API directly via `curl` or Twilio SDK.
+- **Cannot create interactions directly** — Interactions are read-only resources created automatically when participants communicate. No POST endpoint exists.
+- **A number cannot belong to multiple Proxy Services** — Error 80104 if you try to add a number already in another service's pool.
+- **`dateExpiry` is null until first interaction** — Even with TTL set, `dateExpiry` remains null on the session until the TTL timer starts (triggered by interaction or explicit dateExpiry).
+- **Public Beta, closed to new customers** — Not covered by Twilio SLA. New accounts cannot enable Proxy. Existing customers can continue using it.
+
+## Quick Decision
+
+| Need | Use | Why |
+|------|-----|-----|
+| Rider/driver masking | Session per ride, TTL = ride duration + buffer | Auto-cleanup, both parties share 1 proxy number |
+| Buyer/seller marketplace | Session per transaction, `prefer-sticky` | Same proxy number across messages builds trust |
+| Support callback masking | Session per ticket, close on resolution | Agent's real number never exposed |
+| Maximum privacy between sessions | `avoid-sticky` on service | Different proxy number each time |
+| Published business number + masking | Reserved number + explicit assignment | Number stays consistent, still routed through Proxy |
+| Block abusive callers | Intercept callback returning 403 | Per-interaction gating before connection |
+| Handle calls after session ends | Out-of-session callback | Auto-create new session or play TwiML message |
+| Drain a number before removing | Mark as `isReserved=true` | Stops new assignments, existing sessions finish |
+
+## Decision Frameworks
+
+### Session Mode Selection
+
+| Mode | Voice | SMS | When to use |
+|------|-------|-----|-------------|
+| `voice-and-message` | Yes | Yes | Default — ride-sharing, marketplace, support |
+| `voice-only` | Yes | No | Call centers, privacy-sensitive voice scenarios |
+| `message-only` | No | Yes | Chat-only marketplace, delivery notifications |
+
+### Number Pool Strategy
+
+| Strategy | `numberSelectionBehavior` | Pool Size Guidance | Use Case |
+|----------|--------------------------|-------------------|----------|
+| Maximum privacy | `avoid-sticky` | Larger pool needed | Each session gets a different proxy number |
+| Familiar numbers | `prefer-sticky` | Smaller pool OK | Same real person gets same proxy across sessions |
+| Dedicated numbers | Reserved (`isReserved=true`) | 1:1 mapping | Published numbers, business cards |
+| Number draining | Mark as reserved | N/A | Stop new assignments before removing |
+
+### Geo-Matching
+
+| Level | Scope | Availability | Best for |
+|-------|-------|-------------|----------|
+| `country` | Same country only | Global | International services |
+| `area-code` | Same NPA (area code) | North America only | Local feel for US/Canada users |
+| `extended-area-code` | Same local rate center | North America only | Maximum local appearance |
+
+### TTL Strategy
+
+| Scenario | TTL | Why |
+|----------|-----|-----|
+| Ride-sharing | 3600 (1 hour) | Ride + buffer. Resets on each call/text |
+| Marketplace listing | 86400 (24 hours) | Buyer has a day to communicate |
+| Support ticket | 0 (no expiry) | Close manually on ticket resolution |
+| Quick verification | 300 (5 minutes) | Just enough for a callback |
+
+## Session Lifecycle
 
 ```
-1. Create a proxy session
-2. Add participant A (rider)
-3. Add participant B (driver)
-4. Twilio assigns proxy numbers to each participant
-5. A calls/texts B's proxy number → routed to B's real number
-6. B calls/texts A's proxy number → routed to A's real number
-7. Close session when done
+                    create
+                      |
+                      v
+                   +------+
+                   | open | <- dateStarted=null, dateExpiry=null
+                   +--+---+
+                      | first interaction
+                      v
+               +-------------+
+               | in-progress | <- dateStarted set, TTL timer active
+               +------+------+
+                      | close (API or TTL expiry)
+                      v
+                  +--------+
+                  | closed | <- closedReason set, dateEnded set
+                  +---+----+
+                      | update Status=in-progress
+                      v
+               +-------------+
+               | in-progress | <- reopened, participants preserved
+               +-------------+
 ```
 
-## Intercept Callback
+**Status transitions**: `open` -> `in-progress` (on interaction) -> `closed` (API or TTL) -> `in-progress` (reopen). Cannot go back to `open`.
 
-The intercept callback fires before each interaction is connected:
-- Return **200** to allow the interaction
-- Return **403** to block the interaction
-- Use for logging, rate limiting, or business rules
+## Webhook Reference
 
-## Environment Variables
+### Informational Callback (`callbackUrl`)
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `TWILIO_PROXY_SERVICE_SID` | Yes | Proxy Service SID (starts with KS) |
+Fires on each interaction. Cannot block. Use for logging, analytics.
 
-## Session Modes
+### Intercept Callback (`interceptCallbackUrl`)
 
-| Mode | Description |
-|------|-------------|
-| `voice-and-message` | Both calls and SMS (default) |
-| `voice-only` | Calls only |
-| `message-only` | SMS only |
+Fires **before** each interaction connects.
+
+| Response | Effect |
+|----------|--------|
+| Any 2xx | Allow the interaction |
+| 403 | Block the interaction |
+| Timeout | Allow (fail-open) |
+
+Key payload fields: `inboundParticipantSid`, `outboundParticipantSid`, `interactionSid`, `interactionType` (`voice` or `message`).
+
+### Out-of-Session Callback (`outOfSessionCallbackUrl`)
+
+Fires when an inbound call/SMS arrives on a proxy number with no matching active session.
+
+**Response options**:
+1. Return TwiML (`Content-Type: application/xml`) — play a message, gather input
+2. Return JSON (`Content-Type: application/json`) — auto-create a new session with `participantIdentifier` (required), optional `mode`, `ttl`, `uniqueName`
+
+## Error Codes — Live Verified
+
+| Code | HTTP | Message | Trigger |
+|------|------|---------|---------|
+| 80103 | 400 | Participant already added to session | Duplicate identifier in same session |
+| 80104 | 400 | PhoneNumber already added to service | Duplicate number in pool |
+| 80207 | 400 | No compatible proxy numbers | Empty pool or all numbers reserved |
+| 80404 | 400 | Invalid/unreachable participant identifier | Fake or invalid phone number |
+| 80603 | 400 | Session UniqueName must be unique | Duplicate session name in service |
+| 80608 | 400 | Session status change not supported | Trying to set status to `open` (use `in-progress`) |
+| 80609 | 400 | Max 2 participants per session | Adding 3rd participant |
+
+## Gotchas
+
+### Service Configuration
+
+1. **Service deletion cascades silently**: Deleting a Proxy Service immediately destroys all sessions, participants, interactions, and number assignments. HTTP 204, no confirmation prompt. Always close sessions and remove numbers first if you need an audit trail.
+
+2. **Proxy overwrites phone number webhooks**: When you add a number to a Proxy pool, its voice and SMS webhook URLs are overwritten. When the service is deleted, webhooks revert to Twilio demo defaults (`demo.twilio.com`), NOT the original values. Back up webhook configuration before adding to Proxy.
+
+3. **A number can only belong to one Proxy Service**: Adding a number already in another service returns 80104. Remove it from the first service before adding to another.
+
+### Session Lifecycle
+
+4. **Session stays `open` until first interaction**: Adding participants does not change status to `in-progress`. The session transitions only when actual communication occurs. `dateStarted` and `dateExpiry` remain null until then.
+
+5. **TTL doesn't create a `dateExpiry` until interaction**: Setting `ttl=600` on creation does NOT set `dateExpiry`. The countdown starts on the first interaction. Use explicit `dateExpiry` if you need a hard deadline regardless of interaction.
+
+6. **`dateExpiry` overrides `ttl`**: When both are provided, `dateExpiry` wins for determining when the session expires. Both values are stored.
+
+7. **Closed sessions can be reopened**: Set `Status=in-progress` to reopen. Participants and proxy assignments are preserved. Setting `Status=open` returns error 80608.
+
+8. **`closedReason` values**: `"api"` for programmatic close, other values for TTL expiry or system events. Cleared on reopen.
+
+### Participants & Numbers
+
+9. **Participant identifiers must be real, reachable numbers**: Proxy validates phone number reachability on add. Fake test numbers (like `+15551234567`) return 80404. Use real Twilio numbers or real mobile numbers for testing.
+
+10. **Both participants share the same proxy number**: In a 2-party session with 1 pool number, both participants are assigned the same proxy number. Proxy routes based on who's calling — when A calls the proxy number, it connects to B, and vice versa.
+
+11. **Reserved numbers are excluded from auto-assignment**: Even with explicit `ProxyIdentifierSid`, reserved numbers may be rejected (80207). The documented behavior of explicit reserved number assignment did not work in live testing. To use a specific number, keep it unreserved.
+
+12. **Max 2 participants is not configurable**: Hard platform limit. For multi-party scenarios, create multiple Proxy sessions.
+
+13. **Duplicate participant identifier rejected**: Same phone number cannot appear twice in one session. Error 80103.
+
+### Number Pool Limits
+
+14. **5,000 reserved + 500 unreserved numbers per service**: Reserved numbers are for explicit assignment or draining. Unreserved numbers are the auto-assignment pool.
+
+15. **`inUse` counter on pool numbers**: Shows how many active sessions use each number. Check before removing a number — removing an in-use number disrupts active sessions.
+
+### API
+
+16. **No MCP tools available at runtime**: All 17 Proxy tools exist in source but aren't loaded. Use REST API directly. This is the only Twilio domain with zero MCP tool availability.
+
+17. **Proxy is Public Beta**: Closed to new customers, not covered by SLA. Existing accounts continue to work. Consider Twilio Conversations for new projects needing anonymous communication.
+
+## SID Reference
+
+| Prefix | Resource | Example |
+|--------|----------|---------|
+| `KS` | Service | KS... |
+| `KC` | Session | KC... |
+| `KP` | Participant | KP... |
+| `KI` | Interaction | (read-only, auto-created) |
+
+## Reference Files
+
+| Topic | File | When to read |
+|-------|------|-------------|
+| Test results | [references/test-results.md](references/test-results.md) | Live test evidence with SID references |
+| Assertion audit | [references/assertion-audit.md](references/assertion-audit.md) | Adversarial audit of every factual claim |

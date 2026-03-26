@@ -1,214 +1,244 @@
 ---
 name: verify
-description: Implement phone verification and 2FA with Twilio Verify API. Use when adding OTP, phone verification, or two-factor authentication.
+description: Twilio Verify OTP verification guide. Use when building phone/email verification, 2FA login, signup confirmation, or debugging failed verifications.
 ---
 
-# Verify Skill
+<!-- verified: twilio.com/docs/verify/api, twilio.com/docs/verify/api/verification, twilio.com/docs/verify/api/verification-check, twilio.com/docs/verify/api/service, twilio.com/docs/verify/api/rate-limits-and-timeouts + live testing 2026-03-25 -->
 
-Knowledge for building Twilio Verify API functions for phone number and email verification.
+# Twilio Verify
 
-## What is Twilio Verify?
+OTP verification across SMS, voice, email, and WhatsApp channels. Covers channel selection, service configuration, verification lifecycle, error handling, and fraud prevention.
 
-Twilio Verify provides a complete solution for sending and verifying one-time passcodes (OTPs) across multiple channels:
-- SMS
-- Voice calls
-- Email
-- WhatsApp
-- TOTP (authenticator apps)
+## Scope
 
-## Quick API Reference
+### CAN
+
+- Send OTP codes via SMS, voice call, email, and WhatsApp
+- Silent Network Auth (SNA) for frictionless carrier-level verification
+- TOTP for authenticator app integration (separate factor flow)
+- Custom code lengths: 4-10 digits
+- Custom codes for testing (`customCodeEnabled` on service)
+- Rate limiting via programmable rate limit keys (IP, session ID, etc.)
+- Locale override for message language
+- Lookup integration for carrier/line-type detection during verification
+- PSD2 compliance (amount + payee in verification message)
+- Cancel pending verifications
+- Check by phone/email (`to`) or by VerificationSid
+- Tags metadata for analytics (max 10 tags, 128 chars each)
+- Risk check per-attempt (enable/disable Fraud Guard)
+- DoNotShareWarning appended to SMS body
+- Verification Attempts API for analytics (VL-prefixed SIDs)
+
+### CANNOT
+
+- **No built-in channel fallback** — Must implement retry logic manually (e.g., SMS fails → voice). The API does not auto-escalate between channels.
+- **No webhook on verification completion** — There is no callback URL. You must poll `get_verification_status` or check status in the VerificationCheck response. Status check polling is rate-limited: 60/min, 180/hr, 250/day.
+- **Cannot retrieve the actual code sent** — By design. The code is never returned in API responses.
+- **Cannot change channel mid-verification** — Starting on a new channel reuses the same VE SID and token, but the code itself does not change. You get a new sendCodeAttempt entry.
+- **Cannot extend TTL on an existing verification** — Default 10 minutes. Customizable only at the account level (2min-24hr) via Twilio Support, not per-verification.
+- **VE SID deleted after approval** — Fetching an approved verification returns 404. Canceled and max_attempts_reached verifications remain fetchable.
+- **`auto` channel not universally available** — Returns 60200 on accounts without Fraud Guard or specific configuration. Do not assume it works.
+- **Email requires Mailer configuration** — Passing `channel: 'email'` without a configured Mailer (SendGrid integration) on the service returns error 60217. This is a service-level setup, not a per-request option.
+- **SNA requires carrier integration** — Returns 60001 "Downstream Authentication Failed" without carrier-level setup. Region-dependent availability.
+- **No SMS delivery confirmation** — Verify API does not report whether the SMS was actually delivered. Use Messaging Insights separately if delivery tracking is needed.
+
+## Quick Decision
+
+| Need | Use | Why |
+|------|-----|-----|
+| Signup phone confirmation | `start_verification` + `check_verification` via SMS | Simplest flow, highest reach |
+| Login 2FA | Same flow, store verified flag in your DB | Verify does not track "verified users" |
+| Voice fallback after SMS | Start with `channel: 'sms'`, retry with `channel: 'call'` | Manual fallback; same VE SID reused |
+| Email verification | Configure Mailer on service first, then `channel: 'email'` | Will not work without Mailer (error 60217) |
+| Frictionless verification | SNA (`channel: 'sna'`) | No code, carrier-level — but limited availability |
+| Authenticator app | TOTP factor creation (separate API flow) | Not via `start_verification` |
+| Testing without real SMS | `customCodeEnabled: true` on service + `customCode` param | Avoids rate limits and costs |
+| Fraud prevention | `lookupEnabled: true` on service + `riskCheck: 'enable'` | Carrier type detection + Fraud Guard |
+
+## Decision Frameworks
+
+### Channel Selection
+
+| Channel | Setup Required | Code Delivery | User Experience | Best For |
+|---------|---------------|---------------|-----------------|----------|
+| `sms` | None | 4-10 digit code | Universal, familiar | Default for most apps |
+| `call` | None | Spoken code (DTMF prompt by default) | Accessible, works on landlines | Fallback for SMS, accessibility |
+| `email` | Mailer integration on service | Code in email body | Slower, may land in spam | Email-only verification |
+| `whatsapp` | WhatsApp sender on service | Code in WhatsApp message | Rich, high open rate | Markets with high WhatsApp usage |
+| `sna` | Carrier integration | No code (silent) | Frictionless, invisible | Mobile apps with carrier support |
+| `auto` | Fraud Guard (account-level) | Varies | Twilio chooses best channel | Not reliably available |
+
+### Service Configuration Strategy
+
+| Setting | Default | When to Change |
+|---------|---------|---------------|
+| `codeLength` | 6 | Shorter (4) for better UX; longer (8-10) for higher security |
+| `lookupEnabled` | false | Enable for fraud detection (adds carrier type to response) |
+| `skipSmsToLandlines` | false | Enable to auto-route landlines to voice (requires lookupEnabled) |
+| `dtmfInputRequired` | true | Disable for simpler voice UX (code plays immediately) |
+| `customCodeEnabled` | false | Enable for testing environments only |
+| `doNotShareWarningEnabled` | false | Enable for consumer-facing apps (adds security text to SMS) |
+
+## Integration Patterns
+
+### Basic SMS Verification
 
 ```javascript
-const client = context.getTwilioClient();
-
 // Start verification
 const verification = await client.verify.v2
   .services(context.TWILIO_VERIFY_SERVICE_SID)
-  .verifications.create({ to: '+1234567890', channel: 'sms' });
+  .verifications.create({ to: phoneNumber, channel: 'sms' });
+// verification.status === 'pending'
+// verification.sid === 'VE...' (reused if resending within TTL)
 
-// Check verification
+// Check code
 const check = await client.verify.v2
   .services(context.TWILIO_VERIFY_SERVICE_SID)
-  .verificationChecks.create({ to: '+1234567890', code: '123456' });
+  .verificationChecks.create({ to: phoneNumber, code: userCode });
+// check.status === 'approved' means success
+// check.status === 'pending' means wrong code (no error thrown!)
 ```
 
-## Channels
+### Fallback: SMS to Voice
 
-| Channel | Description | Destination Format |
-|---------|-------------|-------------------|
-| `sms` | SMS text message | E.164 phone number |
-| `call` | Voice phone call | E.164 phone number |
-| `email` | Email message | Email address |
-| `whatsapp` | WhatsApp message | E.164 phone number |
-
-## Verification Status Values
-
-| Status | Meaning |
-|--------|---------|
-| `pending` | Code sent, awaiting verification |
-| `approved` | Code correct, verification successful |
-| `canceled` | Verification was canceled |
-| `max_attempts_reached` | Too many incorrect attempts |
-| `expired` | Verification code has expired |
-
-## Key Error Codes
-
-| Code | Description |
-|------|-------------|
-| `60200` | Invalid parameter (also: FriendlyName has 5+ total digits) |
-| `60202` | Max send attempts reached |
-| `60203` | Max check attempts reached |
-| `60212` | Verification expired |
-| `60223` | Phone number not valid |
-
-## Configuration Options
-
-### Service Configuration
-Create a Verify Service in the Twilio Console with these options:
-- **Code Length**: 4-10 digits (default: 6)
-- **Code TTL**: 60-600 seconds (default: 600)
-- **Lookup Enabled**: Validate phone numbers before sending
-- **Skip SMS to Landlines**: Auto-switch landlines to voice
-- **Custom Code Enabled**: Allow custom codes for testing
-
-### Start Verification Options
 ```javascript
+const channel = attemptCount >= 2 ? 'call' : 'sms';
 const verification = await client.verify.v2
+  .services(context.TWILIO_VERIFY_SERVICE_SID)
+  .verifications.create({ to: phoneNumber, channel });
+// Same VE SID and token reused — sendCodeAttempts array grows
+```
+
+### Check by VerificationSid (Alternative)
+
+```javascript
+// When you stored the VE SID instead of the phone number
+const check = await client.verify.v2
   .services(serviceSid)
-  .verifications.create({
-    to: '+1234567890',
-    channel: 'sms',
-    locale: 'en',                    // Message language
-    customFriendlyName: 'MyApp',     // Sender name in message
-    customMessage: 'Your code is {{code}}', // Custom template
-    sendDigits: 'wwww1928',          // DTMF to dial (voice)
-    rateLimits: {
-      uniqueName: 'end_user_phone_number',
-      value: '+1234567890'
-    }
-  });
+  .verificationChecks.create({ verificationSid: veSid, code: userCode });
 ```
 
-## Common Patterns
+### Cancel a Pending Verification
 
-### Basic 2FA Flow
 ```javascript
-// Step 1: Start verification (user requests code)
-exports.startVerification = async (context, event, callback) => {
-  const client = context.getTwilioClient();
-  const { phoneNumber } = event;
+await client.verify.v2
+  .services(serviceSid)
+  .verifications(veSid)
+  .update({ status: 'canceled' });
+// SID remains fetchable with status 'canceled'
+```
 
+### Error Handling — Start Verification
+
+```javascript
+try {
   const verification = await client.verify.v2
-    .services(context.TWILIO_VERIFY_SERVICE_SID)
-    .verifications.create({
-      to: phoneNumber,
-      channel: 'sms'
-    });
-
-  return callback(null, {
-    success: true,
-    status: verification.status
-  });
-};
-
-// Step 2: Check verification (user submits code)
-exports.checkVerification = async (context, event, callback) => {
-  const client = context.getTwilioClient();
-  const { phoneNumber, code } = event;
-
-  const verificationCheck = await client.verify.v2
-    .services(context.TWILIO_VERIFY_SERVICE_SID)
-    .verificationChecks.create({
-      to: phoneNumber,
-      code: code
-    });
-
-  if (verificationCheck.status === 'approved') {
-    // Grant access, create session, etc.
-    return callback(null, { success: true, verified: true });
+    .services(serviceSid)
+    .verifications.create({ to: phoneNumber, channel: 'sms' });
+  return { success: true, status: verification.status };
+} catch (error) {
+  switch (error.code) {
+    case 60200: // Invalid parameter (To, Channel, Locale, etc.)
+      return { success: false, error: 'Invalid input: ' + error.message };
+    case 60203: // Max SEND attempts reached
+      return { success: false, error: 'Too many attempts. Wait before retrying.' };
+    case 60217: // Email channel not configured
+      return { success: false, error: 'Email verification not available.' };
+    default:
+      throw error;
   }
-
-  return callback(null, { success: false, verified: false });
-};
+}
 ```
 
-### Fallback to Voice
+### Error Handling — Check Verification
+
 ```javascript
-exports.handler = async (context, event, callback) => {
-  const client = context.getTwilioClient();
-  const { phoneNumber, attemptCount = 0 } = event;
+try {
+  const check = await client.verify.v2
+    .services(serviceSid)
+    .verificationChecks.create({ to: phoneNumber, code: userCode });
 
-  // Use voice after 2 failed SMS attempts
-  const channel = attemptCount >= 2 ? 'call' : 'sms';
-
-  const verification = await client.verify.v2
-    .services(context.TWILIO_VERIFY_SERVICE_SID)
-    .verifications.create({
-      to: phoneNumber,
-      channel: channel
-    });
-
-  return callback(null, {
-    success: true,
-    status: verification.status,
-    channel: channel
-  });
-};
-```
-
-## Error Handling
-
-### Error Handling Pattern
-```javascript
-exports.handler = async (context, event, callback) => {
-  const client = context.getTwilioClient();
-
-  try {
-    const verification = await client.verify.v2
-      .services(context.TWILIO_VERIFY_SERVICE_SID)
-      .verifications.create({
-        to: event.phoneNumber,
-        channel: 'sms'
-      });
-
-    return callback(null, { success: true, status: verification.status });
-  } catch (error) {
-    if (error.code === 60202) {
-      return callback(null, {
-        success: false,
-        error: 'Too many attempts. Please wait before trying again.'
-      });
-    }
-    if (error.code === 60223) {
-      return callback(null, {
-        success: false,
-        error: 'Invalid phone number format.'
-      });
-    }
-    throw error;
+  if (check.status === 'approved') {
+    return { success: true, verified: true };
   }
-};
+  // Wrong code: status remains 'pending', valid=false — NOT an error
+  return { success: false, verified: false, attemptsRemaining: true };
+} catch (error) {
+  if (error.code === 60202) {
+    // Max CHECK attempts (5 wrong codes)
+    return { success: false, verified: false, attemptsRemaining: false };
+  }
+  if (error.code === 20404) {
+    // VE SID deleted (expired or already approved)
+    return { success: false, error: 'Verification expired. Request a new code.' };
+  }
+  throw error;
+}
 ```
-
-## Testing Verify Functions
-
-### Test Phone Numbers
-Twilio provides magic phone numbers for testing — see Twilio docs for current test numbers. With Custom Code enabled on your Verify Service, code `123456` works for test numbers in development.
-
-## Environment Variables
-
-```
-TWILIO_VERIFY_SERVICE_SID=VAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-## Best Practices
-
-1. **Use Rate Limiting**: Prevent abuse by limiting verification attempts per phone number
-2. **Implement Retry Logic**: Offer voice fallback after SMS failures
-3. **Handle Timeouts**: Codes expire; inform users clearly
-4. **Secure Endpoints**: Use `.protected.js` for all verification endpoints
-5. **Log Attempts**: Track verification attempts for security monitoring
 
 ## Gotchas
 
-- **Verify Service FriendlyName rejects 5+ total digits** -- The Verify API returns error 60200 ("Invalid parameter: FriendlyName") if the name contains 5 or more digit characters total, even if non-consecutive. Names like `my-service-12345` or `svc-1a2b3c4d5e` will fail. Use alpha-only suffixes for programmatic names: `echo "$TIMESTAMP" | md5 | tr '0-9' 'g-p' | head -c 8`
+### Service Setup
+
+1. **FriendlyName rejects 5+ total digits**: Error 60200 if the name contains 5 or more digit characters, even non-consecutive. `my-svc-1a2b3c4d5` fails. Use alpha-only suffixes: `echo "$TS" | md5 | tr '0-9' 'g-p' | head -c 8`.
+
+2. **Email channel requires Mailer integration**: Passing `channel: 'email'` without first configuring a Mailer (SendGrid or custom SMTP) on the Verify Service returns error 60217 with no hint about what to configure.
+
+3. **`auto` channel is not universally available**: Returns 60200 "Invalid parameter: Channel" on accounts without Fraud Guard. Do not use in production without confirming account eligibility.
+
+### Verification Lifecycle
+
+4. **Wrong code does NOT throw an error**: A wrong code returns `status: 'pending'`, `valid: false` with no exception. Client code must check the `status` field, not rely on try/catch. Only the 6th wrong attempt throws error 60202.
+
+5. **VE SID deleted after approval but not after cancel**: Approved verifications return 404 on fetch. Canceled verifications remain fetchable. Max-attempts verifications remain fetchable. This asymmetry means you cannot reliably fetch final status after a successful verification.
+
+6. **Same token reused within validity window**: Resending to the same number returns the same VE SID and code. The sendCodeAttempts array grows but the code does not change. This is by design — prevents code-rotation attacks.
+
+7. **Channel switch reuses VE SID**: Switching from SMS to voice to WhatsApp all use the same VE SID and token. Each channel gets a new VL-prefixed sendCodeAttempt entry.
+
+### Error Codes
+
+8. **Error 60202 is max CHECK attempts, not max SEND**: 60202 = too many wrong codes (5 attempts). 60203 = too many sends to same number in time window.
+
+9. **Checking a non-existent verification returns 60200, not 404**: If you check a phone number that has no pending verification, you get 60200 "Invalid parameter `To`" rather than a 404. The error message is misleading.
+
+10. **60200 is the catch-all error code**: Used for invalid FriendlyName, invalid To, invalid Channel, invalid Locale, invalid CodeLength, and non-existent verifications. Read the error message, not the code alone.
+
+### Configuration
+
+11. **`dtmfInputRequired` defaults to true**: Voice verifications prompt the user to press a key before reading the code. If you want the code read immediately, set this to false on the service.
+
+12. **`lookupEnabled` adds carrier data to verification response**: When enabled, the `lookup` field contains carrier type (mobile/landline/voip), name, and MCC/MNC. Useful for fraud detection but adds latency and cost per verification.
+
+13. **Code length 4-10 enforced at service creation**: Values below 4 or above 10 return 60200. The default is 6. This is set on the Service, not per-verification.
+
+14. **Custom codes require service-level opt-in**: The `customCode` parameter is silently ignored unless `customCodeEnabled: true` is set on the Verify Service. Use this for testing environments only.
+
+### Rate Limits
+
+15. **5 check attempts per verification**: After 5 wrong codes, status becomes `max_attempts_reached` and subsequent checks throw 60202. The user must request a new verification.
+
+16. **Send rate limit is per-number, per-time-window**: Sending too many verifications to the same number within 10 minutes triggers 60203. The exact threshold depends on account configuration (documented as 5 per 10 minutes).
+
+## Error Code Reference
+
+| Code | Meaning | Trigger |
+|------|---------|---------|
+| 60200 | Invalid parameter | FriendlyName, To, Channel, Locale, CodeLength, or non-existent verification |
+| 60202 | Max check attempts reached | 5 wrong codes submitted for one verification |
+| 60203 | Max send attempts reached | Too many sends to same number in time window |
+| 60212 | Verification expired | Code TTL elapsed (default 10 minutes) |
+| 60217 | Mailer not configured | `channel: 'email'` without Mailer on service |
+| 60223 | Invalid phone number | Non-E.164 format or unroutable number |
+| 60001 | Downstream auth failed | SNA without carrier integration |
+| 20404 | Resource not found | Fetching deleted VE SID (approved/expired) |
+
+## Reference Files
+
+| Topic | File | When to read |
+|-------|------|-------------|
+| Assertion audit | [references/assertion-audit.md](references/assertion-audit.md) | Verifying claim provenance, reviewing evidence chain |
+
+- **MCP tools**: `mcp__twilio__start_verification`, `mcp__twilio__check_verification`, `mcp__twilio__get_verification_status`
+- **Related skills**: [voice skill](../voice/SKILL.md) (voice verification use case)
+- **Twilio docs**: [Verify API](https://www.twilio.com/docs/verify/api), [Rate Limits](https://www.twilio.com/docs/verify/api/rate-limits-and-timeouts), [Best Practices](https://www.twilio.com/docs/verify/developer-best-practices)

@@ -1,456 +1,221 @@
 ---
 name: sync
-description: Real-time state synchronization with Twilio Sync Documents, Lists, Maps, and Streams. Use when needing shared state across clients or webhook invocations.
+description: Twilio Sync development guide. Use when building real-time state synchronization, key-value stores, ordered lists, ephemeral messaging, or choosing between Documents, Lists, Maps, and Streams.
 ---
 
-# Sync Skill
+<!-- verified: twilio.com/docs/sync/api, twilio.com/docs/sync/api/document-resource, twilio.com/docs/sync/api/list-resource, twilio.com/docs/sync/api/listitem-resource, twilio.com/docs/sync/api/map-resource, twilio.com/docs/sync/api/map-item-resource, twilio.com/docs/sync/api/stream-resource, twilio.com/docs/sync/api/stream-message-resource, twilio.com/docs/sync/limits + live testing 2026-03-25 -->
+
+# Twilio Sync
+
+Real-time state synchronization via four primitives: Documents (single JSON objects), Lists (ordered collections), Maps (key-value stores), and Streams (ephemeral pub/sub). Covers data type selection, TTL lifecycle, conflict resolution, MCP tool coverage, and error handling.
+
+## Scope
+
+### CAN
+
+- Store JSON state in Documents (single mutable objects, up to 16 KiB)
+- Append-only ordered items in Lists (auto-indexed, up to 1M items per list)
+- Key-value lookups in Maps (string keys up to 320 chars, up to 1M items per map)
+- Fire-and-forget pub/sub via Streams (ephemeral, max 4 KiB per message)
+- TTL on all object types: 0-31,536,000 seconds (0 = no expiry)
+- Per-item TTL on List items and Map items independent of parent container TTL
+- `collectionTtl` on item operations to reset parent container's TTL (keep-alive pattern)
+- Conditional updates via `If-Match` header with revision string (optimistic concurrency)
+- Webhook events for all CRUD operations on Documents, Lists, Maps, and Streams
+- Access documents/lists/maps/streams by SID or UniqueName interchangeably in URL paths
+- Documents without uniqueName (SID-only access)
+- List items with `order` (asc/desc) and `from` (index) query params for pagination
+- Map items with `order` (asc/desc) and `from` (key) query params for pagination (REST API only; MCP `list_sync_maps` does not expose these)
+- Unicode and special characters in Map keys (dots, accented characters)
+- Empty object `{}` as valid Document data
+
+### CANNOT
+
+- **No merge/patch updates** — Document and Map Item updates are full replacement. Updating `{theme: "light"}` on a document containing `{theme: "dark", version: "1.0", nested: {key: "value"}}` produces `{theme: "light"}` — the other fields are gone. Read-modify-write is required for partial updates.
+- **No arbitrary List index insertion** — List indices are append-only. You cannot insert at a specific position. Indices are non-contiguous after deletions and never reused. After adding items 0,1,2, deleting 1, the next item gets index 4 (not 1 or 3).
+- **No upsert on Map items** — `add_sync_map_item` (create) errors with 54208 if the key exists. You must use `update_sync_map_item` for existing keys. This is NOT a set-or-create operation.
+- **No slash characters in Map keys** — Keys containing `/` can be created but **cannot be individually fetched, updated, or deleted** via REST API because the slash is interpreted as a URL path separator. They become orphaned — visible only via list/validate operations. This applies to both MCP tools and direct REST calls.
+- **Stream messages are not persisted** — No fetch, list, update, or delete operations exist. Messages are fire-and-forget with no delivery guarantee and no ordering guarantee. Max 30 msg/s per stream.
+- **No MCP tools for Streams** — Stream create, delete, list, and message publish operations have no MCP tool equivalents. Use REST API or Twilio SDK directly.
+- **No `delete_sync_map` MCP tool** — Maps can only be deleted via REST API (`DELETE /v1/Services/{ServiceSid}/Maps/{MapSid}`, returns 204).
+- **No conditional updates via MCP** — `If-Match` header for optimistic concurrency is REST-only. MCP update tools always perform unconditional last-write-wins.
+- **No `get_sync_list` or `get_sync_map` MCP tools** — Cannot fetch container metadata (revision, dateExpires) via MCP. Use `validate_sync_list` / `validate_sync_map` as a workaround.
+- **No `get_sync_list_item` MCP tool** — Cannot fetch a single List item by index via MCP. Use `list_sync_list_items` with `from` param as a workaround.
+- **TTL enforcement is not instantaneous** — Twilio docs say "there can be a delay between the expiration time and the resource's deletion." In practice, enforcement is prompt (10s TTL gone within 15s), but do not rely on exact-second deletion.
+- **Write rate degrades with payload size** — Sustained 20 writes/s per object for small payloads. Objects >1 KiB face stricter limits; 10 KiB+ capped at 2 writes/s. Stream messages >3 KiB capped at 7 msg/s.
+
+## Quick Decision
+
+| Need | Use | Why |
+|------|-----|-----|
+| Call state across webhooks | Document per CallSid with TTL | Single mutable object, predictable name, auto-cleanup |
+| Configuration / settings | Document with uniqueName | Simple key-value, fetch by name |
+| Activity feed / event log | List with TTL | Ordered, append-only, paginate with `order=desc` |
+| User sessions / presence | Map with item TTL | Key per user, independent expiry per item |
+| Real-time typing indicators | Stream | Ephemeral, no persistence needed |
+| Payment state tracking | Document (polled by name) | Agent server polls document by well-known name |
+| Queue of work items | List | Ordered, process from index 0, remove after processing |
+| Feature flags / config store | Map | Key per flag, update independently |
+| Temporary test validation | Document with 24h TTL | Callback logging, auto-cleanup |
+
+## Decision Frameworks
+
+### Data Type Selection
+
+| Criterion | Document | List | Map | Stream |
+|-----------|----------|------|-----|--------|
+| Data model | Single JSON object | Ordered JSON items | Keyed JSON items | Ephemeral JSON messages |
+| Max data size | 16 KiB total | 16 KiB per item | 16 KiB per item | 4 KiB per message |
+| Max items | 1 (it's one object) | 1,000,000 | 1,000,000 | N/A (not stored) |
+| Access pattern | By name/SID | By index or range | By key | Subscribe only |
+| Ordering | N/A | Insertion order (indices) | Lexicographic by key | None guaranteed |
+| TTL support | On document | On list + per item | On map + per item | On stream |
+| Webhook events | create/update/remove | create/remove + item add/update/remove | create/remove + item add/update/remove | message_published |
+| MCP tool coverage | Full CRUD | Most operations (no single-item fetch) | Most operations (no container delete) | None |
+| Conflict resolution | Last-write-wins (or If-Match) | Last-write-wins per item | Last-write-wins per item | N/A |
+
+### TTL Strategy
+
+| Scenario | TTL approach | Why |
+|----------|-------------|-----|
+| Call-scoped state | Document TTL = 1 hour | Call won't last longer; auto-cleanup |
+| Test validation data | Document TTL = 24 hours | Enough time to inspect, then gone |
+| User presence with heartbeat | Map item TTL = 5 min, refresh on heartbeat | Auto-offline if heartbeat stops |
+| Activity feed with retention | List TTL = 7 days | Keep recent history, auto-prune |
+| Long-lived configuration | No TTL (ttl=0) | Persist until explicitly deleted |
+| Keep-alive on active lists | `collectionTtl` on item writes | Parent container stays alive while items flow |
+
+### When to Use If-Match (Conditional Updates)
 
-Knowledge for building Twilio Sync API functions for real-time state synchronization across devices and services.
+| Scenario | Use If-Match? | Why |
+|----------|--------------|-----|
+| Multiple writers to same document | Yes | Prevents silent overwrites, detects conflicts |
+| Single writer (webhook handler) | No | Only one writer, no conflict possible |
+| Append-only list items | No | Each item gets a unique index, no conflicts |
+| Map items with known ownership | No | One writer per key, last-write-wins is fine |
+| Counter/accumulator patterns | Yes | Read-modify-write needs atomicity |
 
-### Action-Routed Pattern
+Note: If-Match requires REST API. MCP tools always use unconditional writes.
 
-All three CRUD functions use an `action` parameter to determine the operation:
+## MCP Tool Reference
 
-```javascript
-// POST with action=create, documentName=app-config, data={"theme":"dark"}
-// POST with action=read, documentName=app-config
-// POST with action=update, documentName=app-config, data={"theme":"light"}
-// POST with action=delete, documentName=app-config
-```
+### Documents (5 tools — full CRUD)
 
-The `data` parameter must be a JSON string (form-encoded bodies arrive as strings). Each handler parses it with `JSON.parse()` and returns clear errors for invalid JSON.
+| Tool | Operation | Key params |
+|------|-----------|-----------|
+| `mcp__twilio__create_document` | Create | `uniqueName` (MCP-required; REST API allows omitting), `data` (required), `ttl` |
+| `mcp__twilio__get_document` | Fetch | `documentSidOrName` |
+| `mcp__twilio__update_document` | Update (full replace) | `documentSidOrName`, `data` (required), `ttl` |
+| `mcp__twilio__delete_document` | Delete | `documentSidOrName` |
+| `mcp__twilio__list_documents` | List all | `limit` (1-100, default 20) |
 
-### Available Actions
+### Lists (7 tools — no single-item fetch, no container fetch)
 
-| Function | Actions |
-|----------|---------|
-| `document-crud` | `create`, `read`, `update`, `delete` |
-| `list-crud` | `create`, `addItem`, `listItems`, `updateItem`, `removeItem` |
-| `map-crud` | `create`, `setItem`, `getItem`, `updateItem`, `removeItem`, `listItems` |
+| Tool | Operation | Key params |
+|------|-----------|-----------|
+| `mcp__twilio__create_sync_list` | Create list | `uniqueName`, `ttl` |
+| `mcp__twilio__list_sync_lists` | List all lists | `limit` |
+| `mcp__twilio__delete_sync_list` | Delete list + all items | `listSidOrName` |
+| `mcp__twilio__add_sync_list_item` | Append item | `listSidOrName`, `data` (required), `ttl` |
+| `mcp__twilio__list_sync_list_items` | List items | `listSidOrName`, `order` (asc/desc), `from` (index), `limit` |
+| `mcp__twilio__update_sync_list_item` | Update item (full replace) | `listSidOrName`, `index`, `data` (required), `ttl` |
+| `mcp__twilio__remove_sync_list_item` | Delete item | `listSidOrName`, `index` |
 
-## What is Twilio Sync?
+### Maps (6 tools — no container fetch, no container delete)
 
-Twilio Sync provides real-time state synchronization primitives for building collaborative and stateful applications:
-- **Documents**: Single JSON objects for simple state (like a settings object)
-- **Lists**: Ordered collections with automatic indexing (like a chat history)
-- **Maps**: Key-value stores for flexible lookups (like user sessions)
-- **Streams**: Pub/sub messaging for ephemeral events (like typing indicators)
+| Tool | Operation | Key params |
+|------|-----------|-----------|
+| `mcp__twilio__create_sync_map` | Create map | `uniqueName`, `ttl` |
+| `mcp__twilio__list_sync_maps` | List all maps | `limit` |
+| `mcp__twilio__add_sync_map_item` | Create item (NOT upsert) | `mapSidOrName`, `key` (required), `data` (required), `ttl` |
+| `mcp__twilio__get_sync_map_item` | Fetch item by key | `mapSidOrName`, `key` |
+| `mcp__twilio__update_sync_map_item` | Update item (full replace) | `mapSidOrName`, `key`, `data` (required), `ttl` |
+| `mcp__twilio__remove_sync_map_item` | Delete item by key | `mapSidOrName`, `key` |
 
-## API Overview
+### Validation (3 tools)
 
-### Sync Service
+| Tool | Purpose | Key params |
+|------|---------|-----------|
+| `mcp__twilio__validate_sync_document` | Verify document data structure | `documentSidOrName`, `expectedKeys`, `expectedTypes`, `strictKeys` |
+| `mcp__twilio__validate_sync_list` | Verify list item count + structure | `listSidOrName`, `minItems`/`maxItems`/`exactItems`, `expectedItemKeys` |
+| `mcp__twilio__validate_sync_map` | Verify map keys + value structure | `mapSidOrName`, `expectedKeys`, `expectedValueKeys` |
 
-All Sync operations require a Sync Service SID.
+### MCP Gaps — REST API Required
 
-```javascript
-const client = context.getTwilioClient();
-const syncService = client.sync.v1.services(context.TWILIO_SYNC_SERVICE_SID);
-```
+| Operation | REST method | Notes |
+|-----------|------------|-------|
+| Delete a Map | `DELETE /v1/Services/{ServiceSid}/Maps/{MapSid}` | Returns 204 |
+| Fetch a List by SID | `GET /v1/Services/{ServiceSid}/Lists/{ListSid}` | For dateExpires, revision |
+| Fetch a Map by SID | `GET /v1/Services/{ServiceSid}/Maps/{MapSid}` | For dateExpires, revision |
+| Fetch single List item | `GET /v1/Services/{ServiceSid}/Lists/{ListSid}/Items/{Index}` | By index |
+| Conditional update | Any update with `If-Match: {revision}` header | Optimistic concurrency |
+| All Stream operations | Full REST CRUD + message publish | Zero MCP coverage |
+| Fetch/update Sync Service | `GET/POST /v1/Services/{ServiceSid}` | webhookUrl, aclEnabled, etc. |
 
-### Documents
+## Gotchas
 
-Single JSON objects (up to 16KB). Ideal for configuration, settings, or simple state.
+### Data & Updates
 
-```javascript
-// Create document
-const doc = await syncService.documents.create({
-  uniqueName: 'app-config',
-  data: { theme: 'dark', version: '1.0' },
-  ttl: 86400  // Optional: auto-delete after 24 hours
-});
+1. **Updates are full replacement, not merge**: Both Document updates and Map Item updates replace the entire `data` object. If you update a document containing 5 fields with an object containing 1 field, the other 4 fields are permanently lost. Always read-modify-write for partial updates.
 
-// Fetch document
-const doc = await syncService.documents('app-config').fetch();
-console.log(doc.data);  // { theme: 'dark', version: '1.0' }
+2. **Map add is not upsert**: `add_sync_map_item` / `create` returns error 54208 if the key already exists. For set-or-create semantics, catch the error and fall back to `update`, or fetch first to decide.
 
-// Update document (full replace)
-await syncService.documents('app-config').update({
-  data: { theme: 'light', version: '1.1' }
-});
+3. **Revision is a string, not an integer**: Revisions look numeric ("0", "1", "2") but are returned as strings in the API. Don't compare with `===` against integers.
 
-// Delete document
-await syncService.documents('app-config').remove();
-```
+4. **Empty object `{}` is valid data**: Documents and items can hold empty JSON objects. This is not an error condition.
 
-### Lists
-
-Ordered collections with automatic indexing. Ideal for message history, activity feeds.
-
-```javascript
-// Create list
-const list = await syncService.syncLists.create({
-  uniqueName: 'chat-messages'
-});
+### Map Keys
 
-// Add item to list
-const item = await syncService.syncLists('chat-messages')
-  .syncListItems.create({
-    data: { sender: 'user123', text: 'Hello!' }
-  });
-console.log(item.index);  // Auto-assigned index
-
-// Fetch items (paginated)
-const items = await syncService.syncLists('chat-messages')
-  .syncListItems.list({ limit: 20, order: 'desc' });
-
-// Update item by index
-await syncService.syncLists('chat-messages')
-  .syncListItems(0).update({
-    data: { sender: 'user123', text: 'Hello! (edited)' }
-  });
-
-// Delete item
-await syncService.syncLists('chat-messages')
-  .syncListItems(0).remove();
-```
-
-### Maps
-
-Key-value stores for flexible lookups. Ideal for user sessions, device states.
-
-```javascript
-// Create map
-const map = await syncService.syncMaps.create({
-  uniqueName: 'user-sessions'
-});
-
-// Set item by key
-await syncService.syncMaps('user-sessions')
-  .syncMapItems.create({
-    key: 'user-123',
-    data: { lastSeen: new Date().toISOString(), status: 'online' }
-  });
-
-// Get item by key
-const item = await syncService.syncMaps('user-sessions')
-  .syncMapItems('user-123').fetch();
-
-// Update item
-await syncService.syncMaps('user-sessions')
-  .syncMapItems('user-123').update({
-    data: { lastSeen: new Date().toISOString(), status: 'away' }
-  });
-
-// Delete item
-await syncService.syncMaps('user-sessions')
-  .syncMapItems('user-123').remove();
-
-// List all items
-const items = await syncService.syncMaps('user-sessions')
-  .syncMapItems.list({ limit: 100 });
-```
-
-### Streams
-
-Pub/sub messaging for ephemeral events. Messages are not persisted.
-
-```javascript
-// Create stream
-const stream = await syncService.syncStreams.create({
-  uniqueName: 'typing-indicators'
-});
-
-// Publish message to stream
-await syncService.syncStreams('typing-indicators')
-  .streamMessages.create({
-    data: { userId: 'user-123', typing: true }
-  });
-```
-
-## TTL (Time-To-Live)
-
-All Sync objects support automatic expiration:
-
-```javascript
-// Document with 1-hour TTL
-await syncService.documents.create({
-  uniqueName: 'temp-session',
-  data: { token: 'abc123' },
-  ttl: 3600  // Seconds until auto-delete
-});
-
-// List item with TTL
-await syncService.syncLists('my-list')
-  .syncListItems.create({
-    data: { message: 'Temporary' },
-    ttl: 300  // Item expires in 5 minutes
-  });
-```
-
-## Webhook Events
-
-Configure webhooks on your Sync Service to receive notifications:
-
-| Event Type | Description |
-|------------|-------------|
-| `document_created` | New document created |
-| `document_updated` | Document data changed |
-| `document_removed` | Document deleted |
-| `list_item_created` | Item added to list |
-| `list_item_updated` | List item changed |
-| `list_item_removed` | Item removed from list |
-| `map_item_created` | Map item created |
-| `map_item_updated` | Map item changed |
-| `map_item_removed` | Map item removed |
-| `stream_message_published` | Message published to stream |
-
-### Webhook Parameters
-
-| Parameter | Description |
-|-----------|-------------|
-| `AccountSid` | Your Twilio Account SID |
-| `ServiceSid` | Sync Service SID |
-| `EventType` | Event type (see above) |
-| `ResourceSid` | SID of affected resource |
-| `UniqueName` | Unique name if set |
-| `DateCreated` | ISO timestamp |
-| `Data` | JSON data (for create/update events) |
-
-## Common Patterns
-
-### Call State Management
-
-Track multi-step call state across webhooks:
-
-```javascript
-// Store call state
-exports.storeCallState = async (context, event, callback) => {
-  const client = context.getTwilioClient();
-  const syncService = client.sync.v1.services(context.TWILIO_SYNC_SERVICE_SID);
-
-  await syncService.documents.create({
-    uniqueName: `call-${event.CallSid}`,
-    data: {
-      stage: 'greeting',
-      selections: [],
-      startTime: new Date().toISOString()
-    },
-    ttl: 3600  // Clean up after 1 hour
-  });
-
-  return callback(null, { success: true });
-};
-
-// Retrieve and update call state
-exports.getCallState = async (context, event, callback) => {
-  const client = context.getTwilioClient();
-  const syncService = client.sync.v1.services(context.TWILIO_SYNC_SERVICE_SID);
-
-  const doc = await syncService.documents(`call-${event.CallSid}`).fetch();
-  const callState = doc.data;
-
-  // Update state
-  await syncService.documents(`call-${event.CallSid}`).update({
-    data: {
-      ...callState,
-      stage: 'menu',
-      selections: [...callState.selections, event.Digits]
-    }
-  });
-
-  return callback(null, callState);
-};
-```
-
-### User Presence
-
-Track online/offline status across devices:
-
-```javascript
-exports.handler = async (context, event, callback) => {
-  const client = context.getTwilioClient();
-  const syncService = client.sync.v1.services(context.TWILIO_SYNC_SERVICE_SID);
-
-  const { userId, status } = event;
-
-  await syncService.syncMaps('user-presence')
-    .syncMapItems.create({
-      key: userId,
-      data: {
-        status: status,  // 'online', 'away', 'offline'
-        lastSeen: new Date().toISOString(),
-        device: event.device || 'unknown'
-      },
-      ttl: 300  // Auto-offline after 5 minutes if no heartbeat
-    });
-
-  return callback(null, { success: true });
-};
-```
-
-### Activity Feed
-
-Maintain an ordered list of events:
-
-```javascript
-// Add activity
-exports.addActivity = async (context, event, callback) => {
-  const client = context.getTwilioClient();
-  const syncService = client.sync.v1.services(context.TWILIO_SYNC_SERVICE_SID);
-
-  const { userId, action, details } = event;
-
-  await syncService.syncLists('activity-feed')
-    .syncListItems.create({
-      data: {
-        userId,
-        action,
-        details,
-        timestamp: new Date().toISOString()
-      },
-      ttl: 604800  // Keep for 7 days
-    });
-
-  return callback(null, { success: true });
-};
-
-// Get recent activity
-exports.getActivity = async (context, event, callback) => {
-  const client = context.getTwilioClient();
-  const syncService = client.sync.v1.services(context.TWILIO_SYNC_SERVICE_SID);
-
-  const items = await syncService.syncLists('activity-feed')
-    .syncListItems.list({
-      limit: event.limit || 20,
-      order: 'desc'
-    });
-
-  return callback(null, {
-    activities: items.map(item => item.data)
-  });
-};
-```
-
-### Real-time Notifications
-
-Use Streams for ephemeral events:
-
-```javascript
-// Publish typing indicator
-exports.publishTyping = async (context, event, callback) => {
-  const client = context.getTwilioClient();
-  const syncService = client.sync.v1.services(context.TWILIO_SYNC_SERVICE_SID);
-
-  await syncService.syncStreams('room-events')
-    .streamMessages.create({
-      data: {
-        type: 'typing',
-        userId: event.userId,
-        roomId: event.roomId,
-        isTyping: event.isTyping
-      }
-    });
-
-  return callback(null, { success: true });
-};
-```
-
-## Error Handling
-
-### Common Error Codes
-
-| Code | Description |
-|------|-------------|
-| `54001` | Sync Service not found |
-| `54007` | Document not found |
-| `54008` | List not found |
-| `54009` | Map not found |
-| `54011` | List item not found |
-| `54012` | Map item not found |
-| `54301` | Document data too large (>16KB) |
-| `54302` | Unique name already exists |
-
-### Error Handling Pattern
-
-```javascript
-exports.handler = async (context, event, callback) => {
-  const client = context.getTwilioClient();
-  const syncService = client.sync.v1.services(context.TWILIO_SYNC_SERVICE_SID);
-
-  try {
-    const doc = await syncService.documents(event.docName).fetch();
-    return callback(null, { success: true, data: doc.data });
-  } catch (error) {
-    if (error.code === 54007) {
-      // Document not found - create it
-      const newDoc = await syncService.documents.create({
-        uniqueName: event.docName,
-        data: { initialized: true }
-      });
-      return callback(null, { success: true, data: newDoc.data, created: true });
-    }
-    if (error.code === 54302) {
-      // Already exists (race condition) - fetch it
-      const doc = await syncService.documents(event.docName).fetch();
-      return callback(null, { success: true, data: doc.data });
-    }
-    throw error;
-  }
-};
-```
-
-## Testing Sync Functions
-
-### Integration Test Pattern
-
-```javascript
-describe('Sync Operations', () => {
-  const testDocName = `test-doc-${Date.now()}`;
-
-  afterAll(async () => {
-    // Cleanup
-    try {
-      await syncService.documents(testDocName).remove();
-    } catch (e) { /* ignore */ }
-  });
-
-  it('should create and fetch document', async () => {
-    const context = createTestContext();
-    const event = {
-      docName: testDocName,
-      data: { test: true }
-    };
-
-    await createDocHandler(context, event, callback);
-
-    const [, response] = callback.mock.calls[0];
-    expect(response.success).toBe(true);
-    expect(response.data.test).toBe(true);
-  });
-});
-```
-
-## Environment Variables
-
-```
-TWILIO_SYNC_SERVICE_SID=ISxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-Create a Sync Service in the Twilio Console or via CLI:
-
-```bash
-twilio api:sync:v1:services:create --friendly-name "My Sync Service"
-```
-
-## Core Principle: Store Truth Once
-
-**Store truth once, then compute its consequences.**
-
-Sync objects should hold authoritative state — not derived or duplicated data. If a value can be computed from existing state, compute it at read time rather than storing it separately.
-
-- Don't store `itemCount` alongside a List — compute it from `syncListItems.list()`
-- Don't duplicate a Document's fields into a Map — reference the Document
-- Don't store timestamps in two places — pick one source and derive the other
-- Use webhook events to trigger computations, not to sync redundant copies
-
-This prevents conflicting state and eliminates an entire class of consistency bugs.
-
-## Best Practices
-
-1. **Use Unique Names**: Always set `uniqueName` for predictable access patterns
-2. **Set TTLs**: Use TTL for temporary data to avoid storage buildup
-3. **Handle Conflicts**: Document updates are last-write-wins; use Maps for key-based updates
-4. **Limit Data Size**: Documents max 16KB; use Lists for larger datasets
-5. **Use Streams for Ephemeral Data**: Don't persist data that doesn't need history
-6. **Clean Up**: Delete Sync objects when no longer needed
-7. **Secure Endpoints**: Use `.protected.js` for write operations
+5. **Slashes in Map keys are a trap**: Keys containing `/` can be created successfully but become individually inaccessible — `get`, `update`, and `remove` all fail with "Parameter 'key' is not valid" because the REST API interprets `/` as a URL path separator. These orphaned items are only visible via list or validate operations. Avoid `/` in Map keys entirely.
+
+6. **Map key max 320 characters (UTF-8)**: Same limit as UniqueName. Dots, hyphens, underscores, and Unicode characters all work.
+
+### List Indices
+
+7. **List indices are non-contiguous after deletions**: Deleting an item leaves a permanent gap. New items are appended with indices that may skip values unpredictably. After items 0,1,2 -> delete 1 -> next item gets index 4, not 1 or 3. Do not use List indices as array positions.
+
+8. **List indices are never reused**: A deleted index is permanently consumed. Lists are not arrays — they are append-only logs with stable identifiers.
+
+### TTL
+
+9. **TTL enforcement is prompt but not instantaneous**: A 10-second TTL document was gone within 15 seconds. A 30-second TTL empty list was already expired when checked at ~25 seconds. Do not rely on exact-second deletion timing, but expect enforcement within seconds.
+
+10. **`collectionTtl` on item operations resets parent's TTL**: Adding or updating an item with `collectionTtl=N` resets the parent List/Map's expiration to N seconds from the operation time — regardless of the original TTL value. This is a keep-alive mechanism.
+
+11. **`ttl` parameter is an alias**: On containers (List, Map, Stream), `ttl` aliases `collectionTtl`. On items, it aliases `itemTtl`. If both the alias and the specific parameter are provided, the alias is silently ignored. MCP tools expose only the `ttl` param (not `collectionTtl`/`itemTtl`), so via MCP you are always using the alias form.
+
+12. **Item TTL is independent of container TTL**: A List item can have `dateExpires: null` (no item TTL) while the parent List has an active TTL. The item outlives its container's original expiry only if collectionTtl is extended.
+
+13. **TTL-triggered deletions are free and rate-limit-exempt**: Manual deletes count toward the 20 creates/deletes per second per service limit. TTL-triggered deletions do not. Prefer TTL for cleanup of ephemeral data.
+
+### Webhooks
+
+14. **`webhooksFromRestEnabled` defaults to false**: Webhooks only fire for SDK-originated mutations unless you explicitly enable REST webhook firing on the Sync Service. MCP tool writes are REST writes — they will not trigger webhooks unless this flag is enabled.
+
+15. **Reachability webhooks fire on hourly rebalancing**: Twilio rebalances connections hourly, generating `endpoint_disconnected` -> `endpoint_connected` webhook pairs that are NOT actual user disconnections. Use `reachabilityDebouncingEnabled` with a debounce window to filter these out.
+
+### Error Codes
+
+16. **Not-found errors return generic 20404**: Document, List, Map, and item not-found errors all return error code 20404 ("The requested resource was not found"), not Sync-specific codes.
+
+17. **Know the actual 54xxx codes**: The codes you will encounter in practice: 54006 (entity too large, HTTP 413), 54008 (invalid JSON/request body, HTTP 400), 54103 (revision mismatch on If-Match, HTTP 412), 54208 (duplicate Map key, HTTP 409), 54301 (uniqueName already exists, HTTP 409).
+
+### Rate Limits
+
+18. **Write rate degrades with payload size**: Sustained 20 writes/s per object for small payloads. At 1 KiB+, limits tighten. At 10 KiB+, you're capped at 2 writes/s. Design accordingly — if you need high write throughput, keep payloads small.
+
+19. **Object creation/deletion rate is per service**: 20 objects/s per service, not per object type. Creating 20 documents/s leaves no room for creating lists or maps in the same second.
+
+### MCP-Specific
+
+20. **`created_by` is always "system" for MCP/REST operations**: SDK operations show the token identity. This matters for audit trails and webhook payloads.
+
+21. **MCP `list_sync_list_items` supports order and from**: Unlike some MCP tools that strip query params, the Sync list items tool properly supports `order` (asc/desc) and `from` (index) for pagination.
+
+## Reference Files
+
+| Topic | File | When to read |
+|-------|------|-------------|
+| Error codes | [references/error-codes.md](references/error-codes.md) | Debugging Sync API errors, correcting wrong error code assumptions |
+| Test results | [references/test-results.md](references/test-results.md) | Live test evidence with SID references for every behavioral claim |
+| Assertion audit | [references/assertion-audit.md](references/assertion-audit.md) | Adversarial audit of every factual claim with verdicts |

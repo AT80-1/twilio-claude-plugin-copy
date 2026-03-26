@@ -1,294 +1,197 @@
 ---
 name: twilio-cli
-description: Comprehensive Twilio CLI and Serverless Toolkit reference. Use when deploying, managing phone numbers, or using CLI commands.
+description: Twilio CLI decision guide. Use when choosing between CLI, MCP tools, Console, or SDK for a Twilio operation — profiles, deployment, serverless toolkit, and CLI-only operations.
 ---
 
-# Twilio CLI Skill
+<!-- verified: twilio CLI 6.2.4, Node 22.22.1, live profile/serverless testing 2026-03-25 -->
 
-Comprehensive reference for Twilio CLI operations. This document covers command patterns, gotchas, and the full command hierarchy to prevent trial-and-error token consumption.
+# Twilio CLI Decision Guide
 
-## Command Structure Patterns
+When to use the Twilio CLI vs MCP tools vs Console vs SDK. Covers CLI-only operations, profile management, serverless deployment, and the operational boundaries between tooling layers.
 
-Understanding CLI patterns prevents guessing at command syntax.
+**This skill is a decision guide, not a command reference.**
 
-### Universal Pattern
-```
-twilio <topic>:<subtopic>:<resource>:<action> [--flags]
-```
+## Scope
 
-### Action Verbs (CRUD)
-| Action | Purpose | Example |
-|--------|---------|---------|
-| `create` | Create resource | `api:core:messages:create` |
-| `fetch` | Get single resource | `api:core:calls:fetch --sid CAxx` |
-| `list` | List resources | `api:core:recordings:list` |
-| `update` | Modify resource | `api:core:calls:update --sid CAxx` |
-| `remove` | Delete resource | `api:core:recordings:remove --sid RExx` |
+### CAN (CLI-Only Operations — No MCP Equivalent)
 
-### SID Prefix Reference
-| Prefix | Resource Type | Example |
-|--------|---------------|---------|
-| `AC` | Account | `ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `CA` | Call | `CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `SM` | Message | `SMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `PN` | Phone Number | `PNxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `VA` | Verify Service | `VAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `IS` | Sync Service | `ISxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `WS` | TaskRouter Workspace | `WSxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `WW` | TaskRouter Workflow | `WWxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `WK` | TaskRouter Worker | `WKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `ZS` | Serverless Service | `ZSxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `ZE` | Serverless Environment | `ZExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `ZN` | Serverless Function | `ZNxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `ZB` | Serverless Build | `ZBxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `MS` | Messaging Service | `MSxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `RE` | Recording | `RExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `CF` | Conference | `CFxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
-| `SK` | API Key | `SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
+- **Profile management**: `profiles:create`, `profiles:list`, `profiles:use`, `profiles:remove` — credential storage and multi-account switching
+- **Serverless deployment**: `serverless:deploy` — deploy functions and assets to Twilio infrastructure
+- **Local development server**: `serverless:start --ngrok` — local function execution with tunnel
+- **Deployment promotion**: `serverless:promote` — promote builds between environments
+- **Deployment rollback**: `serverless:activate` — activate a previous build
+- **Serverless logging**: `serverless:logs --tail` — live tail of deployed function logs
+- **Environment variable management**: `serverless:env:set`, `serverless:env:import` — set vars on deployed services
+- **Plugin management**: `plugins:install`, `plugins:update`, `plugins:uninstall`
+- **Phone number purchase** (interactive): `phone-numbers:buy:local`, `phone-numbers:buy:toll-free` — search + buy in one flow
+- **Phone number release**: `api:core:incoming-phone-numbers:remove`
 
-### Global Flags (All Commands)
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--help` | `-h` | Show help |
-| `--log-level` | `-l` | `debug`, `info`, `warn`, `error`, `none` |
-| `--output` | `-o` | `columns`, `json`, `tsv`, `none` |
-| `--silent` | | Suppress output (`-l none -o none`) |
-| `--profile` | `-p` | Use specific profile |
-| `--properties` | | Columns to display |
-| `--no-header` | | Skip header row |
-| `--limit` | | Max resources (default 50) |
+### CANNOT
 
----
+- **Cannot be called from MCP tools** — MCP never invokes CLI. This is an architectural boundary, not a limitation.
+- **Cannot handle nested JSON parameters** — CLI parameter parsing breaks on complex nested JSON. Use `curl` for these.
+- **`profiles:create` crashes on Node 25.x** — readline incompatibility. Users must manually create `~/.twilio-cli/config.json`.
+- **`--profile` flag on `serverless:*` commands is unreliable** — Serverless commands may ignore `--profile` and use the active profile. Always `profiles:use` first.
+- **No `twilio api:sync:*` item-level operations** — CLI has service/document CRUD but no list-item or map-item commands. Use MCP or SDK.
+- **Presence-based boolean flags** — `--voice-enabled` is correct, `--voice-enabled=true` is NOT. Flags are presence-based, not key=value.
 
-## Serverless Toolkit (`twilio serverless:*`)
+## Quick Decision
 
-The Twilio Serverless Toolkit provides a complete development environment for building, testing, and deploying Twilio Functions and Assets.
+| Need | Use | Why |
+|------|-----|-----|
+| Query calls, messages, recordings | MCP tools | Structured JSON, agent-accessible |
+| Send test SMS or make test call | MCP tools | Rate-limited, validated |
+| Deploy serverless functions | CLI `serverless:deploy` | CLI-only operation |
+| Switch Twilio account | CLI `profiles:use` | CLI-only operation |
+| Purchase phone number | CLI `phone-numbers:buy:*` | Interactive confirmation, financial |
+| Configure webhook URLs | MCP `configure_webhook` | Automated, scriptable |
+| Check debugger errors | MCP `get_debugger_logs` or `validate_*` | SID-first principle |
+| Manage Sync data | MCP tools | Full CRUD, structured responses |
+| Manage TaskRouter | MCP tools (30 tools) | Full coverage |
+| Local function development | CLI `serverless:start` | CLI-only operation |
+| Rollback deployment | CLI `serverless:activate` | CLI-only operation |
+| View deployed function logs | CLI `serverless:logs --tail` | CLI-only live tail |
+| One-off manual inspection | CLI `api:*` commands | Human debugging |
+| Complex nested JSON params | `curl` (REST API directly) | CLI can't handle nested JSON |
 
-### Command Reference
+## Decision Framework
 
-| Command | Description |
-|---------|-------------|
-| `serverless:init <name>` | Create new project |
-| `serverless:start` | Local development server (aliases: `dev`, `run`) |
-| `serverless:deploy` | Deploy to Twilio |
-| `serverless:list` | List deployed services/environments/functions/assets |
-| `serverless:logs` | View function logs |
-| `serverless:promote` | Promote between environments |
-| `serverless:activate` | Rollback to previous build |
-| `serverless:new` | Create function from template |
-| `serverless:list-templates` | Show available templates |
-| `serverless:env:*` | Manage remote environment variables |
+### MCP vs CLI vs Console
 
-### `serverless:start` - Local Development
+| Criterion | MCP Tools | CLI | Console |
+|-----------|-----------|-----|---------|
+| **Who uses it** | Claude/agents | Developers in terminal | Humans in browser |
+| **Output format** | Structured JSON | Tabular/text | Visual UI |
+| **Automation** | Full | Scriptable | Manual only |
+| **Auth model** | .env / CLI profile / env vars | CLI profiles | Browser session |
+| **Best for** | Data queries, sends, CRUD | Deployment, profiles, purchase | Pay Connectors, visual config |
+| **Risk model** | Tier 1-3 guardrails | Human judgment | Human judgment |
 
-```bash
-# Basic (port 3000)
-twilio serverless:start
+### CLI-Only vs MCP-Available
 
-# With ngrok tunnel (for webhooks)
-twilio serverless:start --ngrok
+| Operation | CLI | MCP | Notes |
+|-----------|-----|-----|-------|
+| Profile management | `profiles:*` | — | CLI-only |
+| Serverless deploy/promote/rollback | `serverless:*` | — | CLI-only |
+| Local dev server | `serverless:start` | — | CLI-only |
+| Plugin management | `plugins:*` | — | CLI-only |
+| Send SMS | `api:core:messages:create` | `send_sms` | **Prefer MCP** |
+| Make call | `api:core:calls:create` | `make_call` | **Prefer MCP** |
+| List phone numbers | `phone-numbers:list` | `list_phone_numbers` | **Prefer MCP** |
+| Search numbers | `api:core:available-phone-numbers:*` | `search_available_numbers` | **Prefer MCP** |
+| Purchase number | `phone-numbers:buy:*` or `api:core:incoming-phone-numbers:create` | `purchase_phone_number` | MCP available but CLI recommended (interactive) |
+| Configure webhooks | `phone-numbers:update` | `configure_webhook` | **Prefer MCP** |
+| Debugger logs | `debugger:logs:list` | `get_debugger_logs` | **Prefer MCP** (SID-first) |
+| Sync operations | Limited `api:sync:*` | Full CRUD (21 tools) | **Prefer MCP** |
+| TaskRouter operations | `api:taskrouter:*` | Full CRUD (30 tools) | **Prefer MCP** |
+| Proxy operations | — | 17 tools (source only, not loaded) | REST API via curl |
+| Verify operations | `api:verify:*` | `start_verification`, `check_verification` | **Prefer MCP** |
 
-# Combined (recommended for development)
-twilio serverless:start --ngrok --detailed-logs --live
-```
+### Console-Only Operations (No CLI or MCP)
 
-### `serverless:deploy` - Deployment
+| Operation | Why Console-Only |
+|-----------|-----------------|
+| Pay Connectors configuration | No REST API exists |
+| Trust Hub / A2P 10DLC registration | Complex multi-step wizard |
+| Flex UI configuration | Visual layout editor |
+| Studio Flow visual editor | Drag-and-drop flow builder |
 
-```bash
-# Deploy to default environment (dev)
-twilio serverless:deploy
+## Profile Management
 
-# Deploy to specific environment
-twilio serverless:deploy --environment production
+### The `[env]` Profile
 
-# Specify Node.js runtime version
-twilio serverless:deploy --runtime node22
-```
+When `TWILIO_ACCOUNT_SID` and `TWILIO_AUTH_TOKEN` are set as environment variables, the CLI auto-creates a virtual `[env]` profile that takes precedence over stored profiles. This is the default when using `.env` files loaded by direnv.
 
-### Gotchas - Serverless Deploy
+### Multi-Account Safety
 
-- **`.env` var names**: `twilio-run` reads `ACCOUNT_SID` and `AUTH_TOKEN` (no `TWILIO_` prefix). If your `.env` uses `TWILIO_ACCOUNT_SID`, add unprefixed aliases or deployment fails with "Missing Credentials"
-- **Runtime version**: Default runtime may be outdated. Explicitly set `--runtime node22` for latest features
-- **Environment names**: Names become URL suffixes (e.g., `foo-1234-dev.twil.io`). Use `--production` for clean URLs
-- **Protected functions**: `.protected.js` suffix requires valid Twilio signature
-- **Private functions**: `.private.js` suffix = not exposed as endpoint, only callable internally
-
----
-
-## Phone Numbers (`twilio phone-numbers:*`)
+**Always verify the active profile before deploying.** Multi-account setups are common and deploying to the wrong account is hard to detect.
 
 ```bash
-# List all numbers on account
-twilio phone-numbers:list
+# Check which account is active
+twilio profiles:list
 
-# Update webhook URLs
-twilio phone-numbers:update +1234567890 \
-  --sms-url https://example.com/sms \
-  --voice-url https://example.com/voice
+# Switch to the correct account
+twilio profiles:use my-project
+
+# Verify with an API call
+twilio api:core:accounts:fetch
 ```
 
-### Search & Purchase Numbers
+### Profile Storage
 
-```bash
-# Search for available US numbers
-twilio api:core:available-phone-numbers:local:list \
-  --country-code US \
-  --area-code 415
+Profiles are stored in `~/.twilio-cli/config.json`. The MCP server's credential resolver reads this file as a fallback: `process.env` -> `.env` -> CLI profile.
 
-# Purchase a number
-twilio api:core:incoming-phone-numbers:create \
-  --phone-number +14155551234
-```
+## Serverless Deployment
 
----
+### Key Files
 
-## Debugger & Logs (`twilio debugger:*`)
+| File | Purpose | Gotcha |
+|------|---------|--------|
+| `.twilioserverlessrc` | Service name, folders, env path | Must exist for deploy |
+| `.twiliodeployinfo` | Cached `{accountSid:region -> serviceSid}` | **Stale cache causes 20404 on deploy** |
+| `.env` | Local environment variables | Deployed separately via `serverless:env:import` |
 
-```bash
-# Recent errors (default limit 50)
-twilio debugger:logs:list
+### The `.twiliodeployinfo` Trap
 
-# Filter by log level
-twilio debugger:logs:list --log-level error
+After first deploy, `.twiliodeployinfo` caches the service SID. If the service is deleted but the cache isn't cleared, subsequent deploys fail with error 20404. Fix: `echo '{}' > .twiliodeployinfo`.
 
-# Output as JSON (for parsing/scripting)
-twilio debugger:logs:list -o json
-```
+### Deploy vs Promote
 
----
+| Method | Use When | What Happens |
+|--------|----------|-------------|
+| `serverless:deploy` | New code changes | Builds + deploys to target environment |
+| `serverless:promote` | Promote existing build | Copies build from source to target env (no rebuild) |
+| `serverless:activate` | Rollback | Activates a previous build SID |
 
-## API Commands (`twilio api:*`)
+## Gotchas
 
-### Messages
+### Profiles & Auth
 
-```bash
-# Send SMS
-twilio api:core:messages:create \
-  --to +1234567890 \
-  --from +0987654321 \
-  --body "Hello from CLI"
+1. **`[env]` profile takes precedence**: If `TWILIO_ACCOUNT_SID` is set in environment, the CLI uses it regardless of `profiles:use`. Unset env vars to use stored profiles.
 
-# List recent messages
-twilio api:core:messages:list --limit 10
-```
+2. **`profiles:create` crashes on Node 25.x**: readline incompatibility. Workaround: manually create `~/.twilio-cli/config.json`.
 
-### Calls
+3. **Verify profile before every deploy**: `twilio profiles:list` — the active account may not be what you expect, especially with `[env]` overriding stored profiles.
 
-```bash
-# Make outbound call with TwiML URL
-twilio api:core:calls:create \
-  --to +1234567890 \
-  --from +0987654321 \
-  --url https://example.com/twiml
+### Deployment
 
-# Hangup active call
-twilio api:core:calls:update --sid CAxxxxxxxx --status completed
-```
+4. **`.twiliodeployinfo` stale cache**: Deleting a service without clearing this cache causes 20404 on next deploy. Fix: `echo '{}' > .twiliodeployinfo`.
 
-### Verify
+5. **`--override-existing-project` is destructive**: Overwrites the entire service. All functions and assets are replaced, not merged. Previous URLs may break if functions were renamed or removed.
 
-```bash
-# Start verification (SMS)
-twilio api:verify:v2:services:verifications:create \
-  --service-sid VAxxxxxxxx \
-  --to +1234567890 \
-  --channel sms
+6. **`punycode` deprecation warning on Node 22+**: Cosmetic warning `[DEP0040]` on every CLI command. Harmless but noisy.
 
-# Check verification code
-twilio api:verify:v2:services:verification-checks:create \
-  --service-sid VAxxxxxxxx \
-  --to +1234567890 \
-  --code 123456
-```
+7. **`--production` flag affects domain name**: `serverless:deploy --production` changes the URL format. Without it, URLs include the environment name as a subdomain.
 
----
+### Command Syntax
 
-## Common Workflows
+8. **Boolean flags are presence-based**: `--voice-enabled` (correct), NOT `--voice-enabled=true` (wrong). This applies to all boolean flags on search/buy commands.
 
-### Development Cycle
+9. **`-o json` for machine-readable output**: Always use `-o json` when parsing CLI output programmatically. Default columnar output is for human readability only.
 
-```bash
-# 1. Start local server with ngrok
-twilio serverless:start --ngrok --live
+10. **CLI can't handle nested JSON**: Operations requiring complex nested JSON parameters must use `curl` with the REST API directly.
 
-# 2. Update phone number webhooks to ngrok URL
-twilio phone-numbers:update +1234567890 \
-  --sms-url https://abc123.ngrok.io/sms \
-  --voice-url https://abc123.ngrok.io/voice
+### MCP vs CLI Confusion
 
-# 3. Deploy to dev
-twilio serverless:deploy --environment dev --runtime node22
-```
+11. **Never use `twilio api:*` when MCP tool exists**: MCP tools provide structured JSON, rate limiting, and agent accessibility. CLI `api:*` commands are for human debugging only.
 
-### Deploy to Production
+12. **CLI is only for `profiles:*`, `serverless:*`, `plugins:*`**: These three command families have no MCP equivalent. Everything else has an MCP tool and should use it.
 
-```bash
-# 1. Deploy to staging first
-twilio serverless:deploy --environment staging --runtime node22
+## SID Reference (CLI Output)
 
-# 2. Promote to production
-twilio serverless:promote \
-  --service-sid ZSxxxx \
-  --source-environment staging \
-  --environment production
-```
+| Prefix | Resource | CLI Command |
+|--------|----------|-------------|
+| `ZS` | Serverless Service | `serverless:list` |
+| `ZE` | Serverless Environment | `serverless:list environments` |
+| `ZB` | Serverless Build | `serverless:list builds` |
+| `ZH` | Serverless Function | `serverless:list functions` |
+| `NO` | Debugger Alert | `debugger:logs:list` |
 
----
+## Reference Files
 
-## Quick Reference Card
+| Topic | File | When to read |
+|-------|------|-------------|
+| Assertion audit | [references/assertion-audit.md](references/assertion-audit.md) | Adversarial audit of every factual claim |
 
-| Task | Command |
-|------|---------|
-| **Local Development** | |
-| Start local dev | `twilio serverless:start` |
-| Start with tunnel | `twilio serverless:start --ngrok --live` |
-| **Deployment** | |
-| Deploy to dev | `twilio serverless:deploy --environment dev --runtime node22` |
-| Deploy to prod | `twilio serverless:deploy --production --runtime node22` |
-| **Logs & Debugging** | |
-| Check errors | `twilio debugger:logs:list --limit 10` |
-| View live logs | `twilio serverless:logs --service-sid X --environment Y --tail` |
-| **Resources** | |
-| List services | `twilio serverless:list services` |
-| List numbers | `twilio phone-numbers:list` |
-| **Testing** | |
-| Send test SMS | `twilio api:core:messages:create --to X --from Y --body Z` |
-| Make test call | `twilio api:core:calls:create --to X --from Y --url Z` |
-
----
-
-## Local Development Decision Tree
-
-| Building... | Use | Why |
-|-------------|-----|-----|
-| Voice IVR, call routing, SMS handlers | `twilio serverless:start --ngrok --live` | Built-in ngrok tunnel, auto-reloads, matches production runtime |
-| ConversationRelay (voice AI) | Serverless for TwiML **+** ngrok for WebSocket server | TwiML handler runs on Serverless; LLM WebSocket needs separate ngrok tunnel |
-| Voice SDK (browser calling) | Express server + ngrok | Needs custom token endpoint + WebSocket |
-
-**Default**: Always start with `twilio serverless:start`. It includes built-in ngrok tunneling (`--ngrok` flag), auto-reloads on file changes (`--live` flag), and runs the same runtime as production.
-
-Add standalone ngrok **alongside** Serverless when you need a protocol it doesn't support (WebSocket, SSE). ConversationRelay is the common case: Serverless serves the TwiML that initiates the call, while a separate ngrok tunnel exposes the WebSocket server that handles the AI conversation.
-
----
-
-## Voice Intelligence Transcript Creation
-
-The CLI can't handle the nested JSON required for the `channel` parameter when creating transcripts. Use `curl` with the REST API instead:
-
-```bash
-curl -X POST "https://intelligence.twilio.com/v2/Transcripts" \
-  -u "$TWILIO_ACCOUNT_SID:$TWILIO_AUTH_TOKEN" \
-  -d "ServiceSid=$TWILIO_INTELLIGENCE_SERVICE_SID" \
-  -d 'Channel={"media_properties":{"source_sid":"RExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},"participants":[{"channel_participant":1,"user_id":"caller"},{"channel_participant":2,"user_id":"agent"}]}'
-```
-
----
-
-## Critical Gotchas
-
-| Issue | Problem | Solution |
-|-------|---------|----------|
-| `--limit` default | Only returns 50 records | Add `--limit 500` or `--no-limit` |
-| `--runtime` not set | Deploys to old Node version | Always add `--runtime node22` |
-| Profile forgotten | Wrong account deployed to | Always verify with `twilio profiles:list` |
-| E.164 format required | `1234567890` fails | Always use `+1234567890` |
+- **Related skills**: [phone-numbers skill](../phone-numbers/SKILL.md) (number search, purchase, webhook configuration)
+- **Twilio docs**: [Twilio CLI](https://www.twilio.com/docs/twilio-cli), [Serverless Toolkit](https://www.twilio.com/docs/labs/serverless-toolkit)

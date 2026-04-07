@@ -243,20 +243,6 @@ if echo "$COMMAND" | grep -qE "^git\s+commit"; then
     fi
 
     # ============================================
-    # META REFERENCE LEAKAGE WARNING
-    # ============================================
-        echo "" >&2
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-        echo "" >&2
-        echo "This may indicate meta-development content leaking into shipped code." >&2
-        echo "" >&2
-        echo "If this is intentional documentation about the separation, proceed." >&2
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-        echo "" >&2
-    fi
-
-    # ============================================
     # LOCAL PATH LEAKAGE CHECK (BLOCKING)
     # ============================================
     # Block commits that ship hardcoded local directory paths.
@@ -285,57 +271,6 @@ if echo "$COMMAND" | grep -qE "^git\s+commit"; then
             exit 2
         else
             _log_bypass "SKIP_PATH_CHECK" "2" "local path leakage check bypassed"
-        fi
-    fi
-
-    # ============================================
-    # META-ONLY HOOK REGISTRATION CHECK (BLOCKING)
-    # ============================================
-    # Block commits that register meta-only scripts as shipped hooks.
-    # meaning it does nothing for fresh-clone users — dead code in settings.json.
-    if git diff --staged --name-only 2>/dev/null | grep -qF '.claude/settings.json'; then
-        # Extract hook script filenames from added lines in the diff
-        NEW_HOOK_FILES=$(git diff --staged -- .claude/settings.json 2>/dev/null \
-            | grep '^+' | grep '\.sh"' \
-            | grep -oE '[a-zA-Z0-9_-]+\.sh' \
-            | sort -u)
-
-        if [ -n "$NEW_HOOK_FILES" ]; then
-            META_ONLY_HOOKS=""
-            for hook_file in $NEW_HOOK_FILES; do
-                # Resolve to full path (hooks live in .claude/hooks/)
-                hook_path="$PROJECT_ROOT/.claude/hooks/$hook_file"
-                [ -f "$hook_path" ] || continue
-
-                # Check first 20 lines for meta-mode-only guard:
-                if head -20 "$hook_path" | tr '\n' ' ' \
-                    META_ONLY_HOOKS="${META_ONLY_HOOKS}  → ${hook_file} (exits when not in meta-mode)\n"
-                fi
-            done
-
-            if [ -n "$META_ONLY_HOOKS" ]; then
-                echo "" >&2
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-                echo "BLOCKED: Meta-only script registered as a shipped hook" >&2
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-                echo "" >&2
-                printf "%b" "$META_ONLY_HOOKS" >&2
-                echo "" >&2
-                echo "Scripts that exit 0 outside meta-mode do nothing for" >&2
-                echo "fresh-clone users. Don't register them in settings.json." >&2
-                echo "" >&2
-                echo "Instead: put the script in scripts/ and call it from" >&2
-                echo "/wrap-up (step 7b/7c, meta-mode section)." >&2
-                echo "" >&2
-                echo "Override: SKIP_META_HOOK_CHECK=true git commit ..." >&2
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-                echo "" >&2
-                if [ "${SKIP_META_HOOK_CHECK:-}" != "true" ]; then
-                    exit 2
-                else
-                    _log_bypass "SKIP_META_HOOK_CHECK" "2" "meta-only hook registration check bypassed"
-                fi
-            fi
         fi
     fi
 

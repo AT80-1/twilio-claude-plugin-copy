@@ -51,7 +51,7 @@ Provide clear APPROVED, NEEDS_CHANGES, or REJECTED decision.
 - [ ] No temporal comments ("new", "improved", "recently changed")
 - [ ] Comments are evergreen and describe code as-is
 - [ ] No unused code or dead imports
-- [ ] No console.log statements (except in tests when appropriate)
+- [ ] No console.error or console.warn statements (triggers debugger alerts 82005/82004)
 
 ### TDD Compliance
 

@@ -36,14 +36,8 @@ if [ -z "$CONTENT" ] && [[ ! "$FILE_PATH" =~ learnings\.md$ ]]; then
     exit 0
 fi
 
-# ============================================
-# META-MODE ISOLATION CHECK
-# ============================================
-
-# Source meta-mode detection
+# Hook directory for sourcing helpers
 HOOK_DIR="$(dirname "$0")"
-if [ -f "$HOOK_DIR/_meta-mode.sh" ]; then
-fi
 
 # Lazy bypass event logger — sources _emit-event.sh on first call only
 _log_bypass() {
@@ -57,97 +51,6 @@ _log_bypass() {
     fi
     emit_event "bypass_used" "$(jq -nc         --arg var "$var_name"         --arg tier "$tier"         --arg ctx "$context"         '{bypass_var:$var, tier:$tier, context:$ctx}' 2>/dev/null)" 2>/dev/null || true
 }
-
-# Check meta-mode isolation (can be bypassed with CLAUDE_ALLOW_PRODUCTION_WRITE=true)
-    # Get project root for path comparison
-    PROJECT_ROOT="${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-
-    # Resolve symlinks in both paths to handle macOS /tmp → /private/tmp
-    # For new files, resolve directory portion (file doesn't exist yet)
-    _META_DIR="$(dirname "$FILE_PATH")"
-    _META_RESOLVED_DIR="$(realpath "$_META_DIR" 2>/dev/null || echo "$_META_DIR")"
-    RESOLVED_FILE_PATH="$_META_RESOLVED_DIR/$(basename "$FILE_PATH")"
-    RESOLVED_PROJECT_ROOT="$(realpath "$PROJECT_ROOT" 2>/dev/null || echo "$PROJECT_ROOT")"
-
-    # Compute relative path from both resolved and raw FILE_PATH.
-    # FILE_PATH is guaranteed absolute (CC v2.1.88+) but not symlink-resolved.
-    # realpath resolves it outside PROJECT_ROOT, breaking the prefix strip.
-    # Fall back to the raw FILE_PATH (relative to PROJECT_ROOT) for pattern matching.
-    RELATIVE_PATH="${RESOLVED_FILE_PATH#$RESOLVED_PROJECT_ROOT/}"
-    if [[ "$RELATIVE_PATH" == "$RESOLVED_FILE_PATH" ]]; then
-        # Resolved path is outside project root — use raw path instead
-        RELATIVE_PATH="${FILE_PATH#$RESOLVED_PROJECT_ROOT/}"
-        # If strip failed, try with unresolved PROJECT_ROOT
-        # (handles case where PROJECT_ROOT itself is under a symlink)
-        if [[ "$RELATIVE_PATH" == "$FILE_PATH" ]]; then
-            RELATIVE_PATH="${FILE_PATH#$PROJECT_ROOT/}"
-        fi
-    fi
-
-    # Only enforce meta-mode isolation for files INSIDE the project root.
-    # Files outside (e.g., ~/.claude/plans/, ~/.claude/memory/) are not
-    # production code — credential checks below still apply to them.
-    if [[ "$RELATIVE_PATH" != "$FILE_PATH" ]]; then
-        # Allowed paths in meta mode
-        # - .claude/* - Claude Code configuration (hooks, plans, etc.)
-        # - scripts/* - development scripts (often need updating)
-        # - __tests__/* - test files (part of development)
-        # - *.md in root - documentation files
-
-        ALLOWED=false
-        case "$RELATIVE_PATH" in
-                ALLOWED=true
-                ;;
-            .claude/*)
-                ALLOWED=true
-                ;;
-            scripts/*)
-                ALLOWED=true
-                ;;
-            .github/*)
-                ALLOWED=true
-                ;;
-            __tests__/*)
-                ALLOWED=true
-                ;;
-            agents/*)
-                ALLOWED=true
-                ;;
-            .env|.env.*)
-                # .env files are gitignored local config, not production code
-                ALLOWED=true
-                ;;
-            */CLAUDE.md)
-                # Domain CLAUDE.md files are development documentation, not production code
-                ALLOWED=true
-                ;;
-            *.md)
-                # Root-level markdown files are docs
-                if [[ "$RELATIVE_PATH" != */* ]]; then
-                    ALLOWED=true
-                fi
-                ;;
-        esac
-
-        if [ "$ALLOWED" = "false" ]; then
-            echo "BLOCKED: Meta mode active - changes to production code blocked!" >&2
-            echo "" >&2
-            echo "" >&2
-            echo "Attempted to write: $RELATIVE_PATH" >&2
-            echo "" >&2
-            echo "Allowed paths in meta mode:" >&2
-            echo "  - .claude/plans/*" >&2
-            echo "  - .claude/archive/*" >&2
-            echo "" >&2
-            echo "To intentionally promote changes to production code:" >&2
-            echo "  CLAUDE_ALLOW_PRODUCTION_WRITE=true <command>" >&2
-            echo "" >&2
-            echo "" >&2
-            exit 2
-        fi
-    fi
-    _log_bypass "CLAUDE_ALLOW_PRODUCTION_WRITE" "1" "meta-mode isolation bypassed for: ${FILE_PATH##*/}"
-fi
 
 # ============================================
 # RESOLVE PATHS FOR DOWNSTREAM CHECKS

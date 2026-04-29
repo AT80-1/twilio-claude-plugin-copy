@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cat <<'EOF'
+Twilio Codex Commands:
+- preflight
+- deploy
+- test
+- twilio-logs
+- twilio-docs
+- validate
+- help-twilio
+EOF

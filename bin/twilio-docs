@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+query="${*:-Twilio docs}"
+encoded=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$query")
+echo "Search Twilio docs for: $query"
+echo "https://www.twilio.com/docs/search?q=$encoded"

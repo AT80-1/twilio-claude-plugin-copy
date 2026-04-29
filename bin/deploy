@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if command -v twilio >/dev/null 2>&1; then
+  twilio serverless:deploy "$@"
+else
+  echo "Twilio CLI not installed. Run codex/install-deps.sh first."
+  exit 1
+fi

@@ -380,3 +380,15 @@ Add phone verification to the signup flow using Twilio Verify
 ## License
 
 MIT
+
+## Codex Scaffold (Experimental)
+
+This repo now includes a Codex-oriented scaffold under `codex/` with command wrappers in `bin/`.
+
+- Manifest: `codex/codex-plugin.json`
+- Commands: `codex/commands/`
+- Roles: `codex/roles/`
+- Skills (Tier-1): `codex/skills/`
+- Executables: `bin/preflight`, `bin/test`, `bin/deploy`, `bin/twilio-logs`, `bin/twilio-docs`, `bin/validate`, `bin/help-twilio`
+
+See `docs/codex-migration.md` for usage.

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v twilio >/dev/null 2>&1; then
+  echo "Twilio CLI not installed. Run: bash codex/install-deps.sh" >&2
+  exit 1
+fi
+
+LOOKBACK_MINUTES="${1:-30}"
+if ! [[ "$LOOKBACK_MINUTES" =~ ^[0-9]+$ ]]; then
+  echo "Usage: bin/validate [lookback_minutes]" >&2
+  exit 2
+fi
+
+echo "Checking Twilio debugger logs from last ${LOOKBACK_MINUTES} minutes..."
+twilio debugger:logs:list --output json \
+  | python3 - "$LOOKBACK_MINUTES" <<'PY'
+import json,sys
+from datetime import datetime, timedelta, timezone
+
+mins=int(sys.argv[1])
+cutoff=datetime.now(timezone.utc)-timedelta(minutes=mins)
+logs=json.load(sys.stdin)
+recent=[]
+for item in logs:
+    ts=item.get("date_created")
+    if not ts:
+        continue
+    try:
+        dt=datetime.fromisoformat(ts.replace("Z","+00:00"))
+    except Exception:
+        continue
+    if dt>=cutoff:
+        recent.append(item)
+
+if not recent:
+    print("PASS: No debugger errors in lookback window.")
+    sys.exit(0)
+
+print(f"WARN: Found {len(recent)} debugger event(s) in lookback window.")
+for e in recent[:10]:
+    print(f"- {e.get('error_code','?')}: {e.get('more_info','')} {e.get('request_url','')}")
+sys.exit(1)
+PY

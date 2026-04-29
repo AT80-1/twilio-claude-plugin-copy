@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v twilio >/dev/null 2>&1; then
+  echo "Twilio CLI not installed. Run: bash codex/install-deps.sh" >&2
+  exit 1
+fi
+
+# Default to dev unless explicit env provided
+ENVIRONMENT="${1:-dev}"
+if [[ "$#" -gt 0 ]]; then
+  shift
+fi
+
+echo "Deploying Twilio Serverless to environment: $ENVIRONMENT"
+twilio serverless:deploy --environment "$ENVIRONMENT" "$@"

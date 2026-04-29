@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+if [[ ! -x "codex/env-doctor.sh" ]]; then
+  echo "Missing codex/env-doctor.sh. Reinstall or pull latest changes." >&2
+  exit 1
+fi
+
+bash codex/env-doctor.sh

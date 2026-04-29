@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [ -f package.json ]; then
+  npm test "$@"
+else
+  echo "No package.json found; run your project test command manually."
+fi

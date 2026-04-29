@@ -1,0 +1,17 @@
+{
+  "name": "twilio-codex-plugin",
+  "version": "0.1.0",
+  "description": "Codex-native Twilio CPaaS development toolkit",
+  "commands": {
+    "preflight": "./bin/preflight",
+    "deploy": "./bin/deploy",
+    "test": "./bin/test",
+    "twilio-logs": "./bin/twilio-logs",
+    "twilio-docs": "./bin/twilio-docs",
+    "validate": "./bin/validate",
+    "help-twilio": "./bin/help-twilio"
+  },
+  "scripts_dir": "./codex",
+  "skills_dir": "./codex/skills",
+  "roles_dir": "./codex/roles"
+}
